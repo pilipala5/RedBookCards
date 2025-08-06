@@ -2,15 +2,35 @@
 # src/core/html_generator.py
 # ============================================
 from pathlib import Path
+from typing import Optional
 
 class HTMLGenerator:
     def __init__(self):
         self.resource_path = Path(__file__).parent.parent / "resources"
         
-    def generate(self, content: str) -> str:
-        """生成完整的 HTML 页面"""
+    def generate(self, content: str, page_num: Optional[int] = None, 
+                 total_pages: Optional[int] = None) -> str:
+        """
+        生成完整的 HTML 页面
+        
+        Args:
+            content: HTML内容
+            page_num: 当前页码（可选）
+            total_pages: 总页数（可选）
+        """
         css = self.get_css()
         js = self.get_js()
+        
+        # 如果提供了页码信息，添加页码显示
+        page_indicator = ""
+        if page_num and total_pages:
+            page_indicator = f"""
+            <div class="page-indicator">
+                <span>{page_num}</span>
+                <span class="separator">/</span>
+                <span>{total_pages}</span>
+            </div>
+            """
         
         html = f"""
 <!DOCTYPE html>
@@ -30,6 +50,7 @@ class HTMLGenerator:
             <div class="watermark">
                 <span>📝 小红书笔记</span>
             </div>
+            {page_indicator}
         </div>
     </div>
     <script>{js}</script>
@@ -75,6 +96,7 @@ class HTMLGenerator:
             overflow: hidden;
             position: relative;
             transition: transform 0.3s ease, box-shadow 0.3s ease;
+            min-height: 600px;
         }
         
         .card:hover {
@@ -84,10 +106,12 @@ class HTMLGenerator:
         }
         
         .content {
-            padding: 45px 40px;
+            padding: 45px 40px 70px 40px;
             color: #2c3e50;
             line-height: 1.8;
             min-height: 450px;
+            max-height: 1300px;
+            overflow-y: auto;
         }
         
         /* 标题样式 */
@@ -319,6 +343,47 @@ class HTMLGenerator:
             font-weight: 500;
         }
         
+        /* 页码指示器 */
+        .page-indicator {
+            position: absolute;
+            bottom: 22px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            color: #9CA3AF;
+            font-weight: 500;
+            padding: 5px 15px;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .page-indicator span {
+            display: inline-block;
+        }
+        
+        .page-indicator .separator {
+            color: #E5E7EB;
+        }
+        
+        /* 页面信息样式（用于导出时的页码） */
+        .page-info {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            color: #999;
+            font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 4px 12px;
+            border-radius: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
         /* 滚动条样式 */
         ::-webkit-scrollbar {
             width: 10px;
@@ -338,17 +403,122 @@ class HTMLGenerator:
         ::-webkit-scrollbar-thumb:hover {
             background: linear-gradient(180deg, #FF2442, #FF1030);
         }
+        
+        /* 响应式调整 */
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            
+            .container {
+                max-width: 100%;
+            }
+            
+            .card {
+                box-shadow: none;
+                border-radius: 0;
+                page-break-inside: avoid;
+            }
+            
+            .watermark {
+                display: none;
+            }
+        }
+        
+        /* 动画效果 */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .content > * {
+            animation: fadeIn 0.5s ease-out;
+        }
         """
     
     def get_js(self) -> str:
         """获取JavaScript代码"""
         return """
-        // 监听编辑器滚动事件（通过postMessage）
-        window.addEventListener('message', function(e) {
-            if (e.data.type === 'scroll') {
+        // 页面加载完成后的动画效果
+        document.addEventListener('DOMContentLoaded', function() {
+            // 添加淡入动画
+            const content = document.getElementById('content');
+            if (content) {
+                content.style.opacity = '0';
+                content.style.transition = 'opacity 0.5s ease-in';
+                setTimeout(() => {
+                    content.style.opacity = '1';
+                }, 100);
+            }
+            
+            // 图片懒加载
+            const images = document.querySelectorAll('img');
+            images.forEach(img => {
+                img.loading = 'lazy';
+            });
+            
+            // 代码块添加复制功能（可选）
+            const codeBlocks = document.querySelectorAll('pre code');
+            codeBlocks.forEach(block => {
+                block.style.cursor = 'pointer';
+                block.title = '点击复制代码';
+                block.addEventListener('click', function() {
+                    const text = this.textContent;
+                    navigator.clipboard.writeText(text).then(() => {
+                        // 显示复制成功提示
+                        const tooltip = document.createElement('div');
+                        tooltip.textContent = '已复制！';
+                        tooltip.style.cssText = `
+                            position: fixed;
+                            top: 50%;
+                            left: 50%;
+                            transform: translate(-50%, -50%);
+                            background: rgba(0, 0, 0, 0.8);
+                            color: white;
+                            padding: 10px 20px;
+                            border-radius: 5px;
+                            z-index: 10000;
+                            font-size: 14px;
+                        `;
+                        document.body.appendChild(tooltip);
+                        setTimeout(() => {
+                            document.body.removeChild(tooltip);
+                        }, 1000);
+                    }).catch(err => {
+                        console.error('复制失败:', err);
+                    });
+                });
+            });
+            
+            // 平滑滚动
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    const target = document.querySelector(this.getAttribute('href'));
+                    if (target) {
+                        target.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                });
+            });
+        });
+        
+        // 监听外部滚动同步请求
+        window.addEventListener('message', function(event) {
+            if (event.data && event.data.type === 'scroll') {
                 const content = document.getElementById('content');
-                const scrollPercentage = e.data.percentage;
-                content.scrollTop = content.scrollHeight * scrollPercentage;
+                if (content) {
+                    content.scrollTop = content.scrollHeight * event.data.percentage;
+                }
             }
         });
         """
