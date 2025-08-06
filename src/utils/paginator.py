@@ -1,7 +1,7 @@
 # ============================================
 # src/utils/paginator.py
 # ============================================
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 from bs4 import BeautifulSoup, NavigableString, Tag
 import re
@@ -17,7 +17,7 @@ class PageElement:
     can_break: bool = True  # 是否可以在此处分页
     
 class SmartPaginator:
-    """智能分页器"""
+    """智能分页器 - 支持多尺寸"""
     
     # 元素高度估算（像素）- 调整为更准确的值
     ELEMENT_HEIGHTS = {
@@ -40,18 +40,30 @@ class SmartPaginator:
         'margin_bottom': 20,  # 元素底部间距
     }
     
-    # 页面参数
-    PAGE_HEIGHT = 1440  # 小红书卡片高度
-    PAGE_WIDTH = 1080   # 小红书卡片宽度
-    PADDING_TOP = 45    # 顶部内边距
-    PADDING_BOTTOM = 70 # 底部内边距（包含水印和页码区域）
-    PADDING_SIDES = 40  # 左右内边距
-    
-    # 内容区域实际宽度（用于计算文本换行）
-    CONTENT_WIDTH = PAGE_WIDTH - (PADDING_SIDES * 2)  # 1000px
-    
-    # 有效内容高度
-    CONTENT_HEIGHT = PAGE_HEIGHT - PADDING_TOP - PADDING_BOTTOM  # 1325px
+    # 页面尺寸配置
+    PAGE_SIZES = {
+        "small": {
+            "width": 720,
+            "height": 960,
+            "padding_top": 35,
+            "padding_bottom": 50,
+            "padding_sides": 30
+        },
+        "medium": {
+            "width": 1080,
+            "height": 1440,
+            "padding_top": 45,
+            "padding_bottom": 70,
+            "padding_sides": 40
+        },
+        "large": {
+            "width": 1440,
+            "height": 1920,
+            "padding_top": 55,
+            "padding_bottom": 90,
+            "padding_sides": 50
+        }
+    }
     
     # 分页策略参数
     MIN_ORPHAN_LINES = 2  # 孤行控制：段落末尾最少保留行数
@@ -62,8 +74,55 @@ class SmartPaginator:
     CHAR_WIDTH = 16  # 中文字符平均宽度
     CHAR_WIDTH_EN = 9  # 英文字符平均宽度
     
-    def __init__(self):
+    def __init__(self, page_size: str = "medium"):
+        """
+        初始化分页器
+        
+        Args:
+            page_size: 页面尺寸 ("small", "medium", "large")
+        """
         self.elements: List[PageElement] = []
+        self.set_page_size(page_size)
+        
+    def set_page_size(self, size: str):
+        """设置页面尺寸"""
+        if size not in self.PAGE_SIZES:
+            size = "medium"
+        
+        config = self.PAGE_SIZES[size]
+        self.page_size_name = size
+        self.page_width = config["width"]
+        self.page_height = config["height"]
+        self.padding_top = config["padding_top"]
+        self.padding_bottom = config["padding_bottom"]
+        self.padding_sides = config["padding_sides"]
+        
+        # 计算内容区域
+        self.content_width = self.page_width - (self.padding_sides * 2)
+        self.content_height = self.page_height - self.padding_top - self.padding_bottom
+        
+        # 根据尺寸调整分页策略
+        if size == "small":
+            self.HEADING_KEEP_WITH = 100  # 小尺寸页面，标题后保留空间可以更少
+        elif size == "large":
+            self.HEADING_KEEP_WITH = 200  # 大尺寸页面，标题后保留更多空间
+        else:
+            self.HEADING_KEEP_WITH = 150
+    
+    def get_page_info(self) -> Dict:
+        """获取当前页面配置信息"""
+        return {
+            "size_name": self.page_size_name,
+            "width": self.page_width,
+            "height": self.page_height,
+            "content_width": self.content_width,
+            "content_height": self.content_height,
+            "padding": {
+                "top": self.padding_top,
+                "bottom": self.padding_bottom,
+                "sides": self.padding_sides
+            }
+        }
         
     def parse_html_to_elements(self, html: str) -> List[PageElement]:
         """将HTML解析为页面元素列表，保持原始顺序"""
@@ -233,12 +292,12 @@ class SmartPaginator:
         return height + self.ELEMENT_HEIGHTS['margin_bottom']
     
     def _estimate_lines(self, text: str, width_reduction: int = 0) -> int:
-        """估算文本行数"""
+        """估算文本行数 - 根据页面宽度动态计算"""
         if not text:
             return 1
         
-        # 计算可用宽度
-        available_width = self.CONTENT_WIDTH - width_reduction
+        # 计算可用宽度（使用动态内容宽度）
+        available_width = self.content_width - width_reduction
         
         # 粗略估算：中英文混合
         # 统计中文字符数
@@ -276,14 +335,14 @@ class SmartPaginator:
             # 检查是否需要新页面
             need_new_page = False
             
-            # 1. 基础高度检查
-            if current_height + element.height > self.CONTENT_HEIGHT:
+            # 1. 基础高度检查（使用动态内容高度）
+            if current_height + element.height > self.content_height:
                 need_new_page = True
             
             # 2. 标题关联检查（避免标题孤立）
             if element.type == 'heading':
                 # 检查标题后是否有足够空间放置内容
-                remaining_height = self.CONTENT_HEIGHT - current_height - element.height
+                remaining_height = self.content_height - current_height - element.height
                 
                 if remaining_height < self.HEADING_KEEP_WITH:
                     # 剩余空间不足，将标题移到下一页
@@ -296,13 +355,14 @@ class SmartPaginator:
             # 3. 段落完整性检查
             if element.type == 'paragraph' and current_page_elements:
                 # 如果段落太大，且当前页已有内容，考虑分页
-                if element.height > self.CONTENT_HEIGHT * 0.6 and current_height > self.CONTENT_HEIGHT * 0.3:
+                if element.height > self.content_height * 0.6 and current_height > self.content_height * 0.3:
                     need_new_page = True
             
-            # 4. 避免页面过空
-            if need_new_page and current_height < self.CONTENT_HEIGHT * 0.3:
-                # 如果当前页面填充不到30%，尽量不分页
-                if element.can_break or element.height < self.CONTENT_HEIGHT * 0.5:
+            # 4. 避免页面过空（根据页面尺寸调整阈值）
+            min_fill_ratio = 0.25 if self.page_size_name == "small" else 0.3
+            if need_new_page and current_height < self.content_height * min_fill_ratio:
+                # 如果当前页面填充不足，尽量不分页
+                if element.can_break or element.height < self.content_height * 0.5:
                     need_new_page = False
             
             # 创建新页面
@@ -334,6 +394,9 @@ class SmartPaginator:
         optimized = []
         i = 0
         
+        # 根据页面尺寸调整合并阈值
+        merge_threshold = 0.35 if self.page_size_name == "small" else 0.4
+        
         while i < len(pages):
             current_page = pages[i]
             
@@ -342,13 +405,13 @@ class SmartPaginator:
             current_height = sum(e.height for e in current_elements)
             
             # 如果页面过短，尝试与下一页合并
-            if current_height < self.CONTENT_HEIGHT * 0.4 and i < len(pages) - 1:
+            if current_height < self.content_height * merge_threshold and i < len(pages) - 1:
                 next_page = pages[i + 1]
                 next_elements = self.parse_html_to_elements(next_page)
                 next_height = sum(e.height for e in next_elements)
                 
                 # 如果合并后不超过最大高度，则合并
-                if current_height + next_height <= self.CONTENT_HEIGHT:
+                if current_height + next_height <= self.content_height:
                     optimized.append(current_page + next_page)
                     i += 2  # 跳过下一页
                     continue
@@ -370,10 +433,12 @@ class SmartPaginator:
             
             pages_info.append({
                 'page_num': i,
+                'page_size': self.page_size_name,
+                'content_dimensions': f"{self.content_width}×{self.content_height}px",
                 'elements_count': len(page_elements),
                 'total_height': total_height,
-                'max_height': self.CONTENT_HEIGHT,
-                'fill_rate': f"{(total_height / self.CONTENT_HEIGHT * 100):.1f}%",
+                'max_height': self.content_height,
+                'fill_rate': f"{(total_height / self.content_height * 100):.1f}%",
                 'elements': [
                     {
                         'type': e.type,

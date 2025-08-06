@@ -1,7 +1,7 @@
 # ============================================
 # src/utils/exporter.py
 # ============================================
-from PySide6.QtCore import QObject, Signal, QTimer, QEventLoop, QSize, Qt, QPoint
+from PySide6.QtCore import QObject, Signal, QTimer, QEventLoop, QSize, Qt, QPoint, QRect
 from PySide6.QtGui import QImage, QPainter, QFont, QColor, QPageSize, QRegion
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtPrintSupport import QPrinter
@@ -53,6 +53,10 @@ class ImageExporter(QObject):
         # 确保输出文件夹存在
         self.output_folder.mkdir(parents=True, exist_ok=True)
         
+        # 确保WebView是固定尺寸
+        self.web_view.setFixedSize(1080, 1440)
+        self.web_view.setZoomFactor(1.0)  # 重置缩放
+        
         # 开始导出第一页
         self._export_next_page()
     
@@ -85,7 +89,7 @@ class ImageExporter(QObject):
         self.web_view.setHtml(full_html, "file:///")
         
         # 等待页面加载完成后导出
-        QTimer.singleShot(1000, lambda: self._capture_page(page_num))
+        QTimer.singleShot(1500, lambda: self._capture_page(page_num))
     
     def _capture_page(self, page_num: int):
         """捕获当前页面为图片"""
@@ -97,74 +101,47 @@ class ImageExporter(QObject):
         filename = f"card_{page_num:02d}.{extension}"
         output_path = self.output_folder / filename
         
-        # 使用render方法捕获页面
-        self._render_to_image(output_path, page_num)
+        # 使用精确的捕获方法
+        self._capture_fixed_size(output_path, page_num)
     
-    def _render_to_image(self, output_path: Path, page_num: int):
-        """使用render方法渲染页面到图片"""
+    def _capture_fixed_size(self, output_path: Path, page_num: int):
+        """捕获固定尺寸的页面"""
         try:
-            # 创建目标尺寸的图片（小红书卡片尺寸）
-            image = QImage(1080, 1440, QImage.Format_ARGB32)
+            # 从html_generator获取当前尺寸
+            target_width = self.html_generator.page_width
+            target_height = self.html_generator.page_height
+            
+            # 创建目标图片
+            image = QImage(target_width, target_height, QImage.Format_ARGB32)
             image.fill(Qt.white)
             
-            # 获取WebView的尺寸
-            view_size = self.web_view.size()
+            # 创建painter
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             
-            # 创建临时图片来捕获WebView内容
-            temp_image = QImage(view_size, QImage.Format_ARGB32)
-            temp_image.fill(Qt.white)
+            # 确保WebView是正确的尺寸
+            self.web_view.resize(target_width, target_height)
             
-            # 创建QPainter并渲染WebView到临时图片
-            painter = QPainter(temp_image)
+            # 渲染WebView到图片
+            # 使用固定的源矩形来确保只捕获卡片区域
+            source_rect = QRect(0, 0, target_width, target_height)
+            target_rect = QRect(0, 0, target_width, target_height)
             
-            # 修复：正确使用 RenderFlag 枚举
-            # 检查 Qt 版本并使用正确的枚举
+            # 渲染WebView
             if isinstance(self.web_view, QWidget):
-                # PySide6 中 QWidget 的 render 方法
                 self.web_view.render(
-                    painter,                    # painter参数
-                    QPoint(0, 0),              # targetOffset参数
-                    QRegion(),                 # sourceRegion参数（默认为整个widget）
+                    painter,
+                    QPoint(0, 0),
+                    QRegion(source_rect),
                     QWidget.RenderFlag.DrawWindowBackground | QWidget.RenderFlag.DrawChildren
                 )
-            else:
-                # 备用方案
-                self.web_view.render(painter)
+            
+            # 可选：添加导出时间水印
+            self._add_export_watermark(painter, page_num)
             
             painter.end()
-            
-            # 创建最终图片的painter
-            final_painter = QPainter(image)
-            # 修复：使用 Qt.SmoothTransformation 而不是 QPainter.SmoothPixmapTransformation
-            final_painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            final_painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            
-            # 计算缩放比例以适应目标尺寸
-            scale_x = 1080.0 / view_size.width()
-            scale_y = 1440.0 / view_size.height()
-            scale = min(scale_x, scale_y)
-            
-            # 计算居中位置
-            scaled_width = int(view_size.width() * scale)
-            scaled_height = int(view_size.height() * scale)
-            x = (1080 - scaled_width) // 2
-            y = (1440 - scaled_height) // 2
-            
-            # 绘制缩放后的图片
-            # 修复：使用 Qt 命名空间下的枚举值
-            final_painter.drawImage(
-                x, y, 
-                temp_image.scaled(
-                    scaled_width, scaled_height,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-            )
-            
-            # 添加水印（可选）
-            self._add_watermark(final_painter, page_num)
-            
-            final_painter.end()
             
             # 保存图片
             success = image.save(str(output_path), self.export_format, self.quality)
@@ -182,18 +159,18 @@ class ImageExporter(QObject):
             self._is_exporting = False
             self.finished.emit(False, f"导出页面 {page_num} 时出错: {str(e)}")
     
-    def _add_watermark(self, painter: QPainter, page_num: int):
-        """添加水印（可选）"""
+    def _add_export_watermark(self, painter: QPainter, page_num: int):
+        """添加导出水印（可选）"""
         # 设置水印字体和颜色
-        font = QFont("Arial", 10)
+        font = QFont("Arial", 9)
         painter.setFont(font)
-        painter.setPen(QColor(200, 200, 200, 100))
+        painter.setPen(QColor(200, 200, 200, 80))
         
-        # 在右下角添加生成时间
-        timestamp = time.strftime("%Y-%m-%d %H:%M")
+        # 在右下角添加生成时间（非常淡的水印）
+        timestamp = time.strftime("%Y%m%d")
         painter.drawText(
-            950, 1410,
-            timestamp
+            1000, 1420,
+            f"{timestamp}"
         )
     
     def export_as_pdf(self, pages: List[str], output_file: str, html_generator):
@@ -212,7 +189,10 @@ class ImageExporter(QObject):
             printer.setOutputFileName(output_file)
             
             # 设置页面大小为小红书卡片比例
-            printer.setPageSize(QPageSize(QSize(1080, 1440), QPageSize.Unit.Point))
+            # 注意：PDF使用点(point)作为单位，1点 = 1/72英寸
+            # 1080px × 1440px 在 96 DPI 下约等于 810pt × 1080pt
+            page_size = QPageSize(QSize(810, 1080), QPageSize.Unit.Point)
+            printer.setPageSize(page_size)
             printer.setPageMargins(0, 0, 0, 0, QPrinter.Unit.Millimeter)
             
             # 合并所有页面内容
@@ -244,8 +224,12 @@ class ImageExporter(QObject):
                 # 添加分页符
                 combined_content += '<div style="page-break-before: always;"></div>'
             
-            # 添加页面内容
-            combined_content += f'<div class="page">{page}</div>'
+            # 添加页面内容，包装在固定尺寸的容器中
+            combined_content += f'''
+            <div style="width: 1080px; height: 1440px; position: relative; overflow: hidden;">
+                {page}
+            </div>
+            '''
         
         # 生成完整HTML
         return html_generator.generate(combined_content)

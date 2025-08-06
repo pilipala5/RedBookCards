@@ -1,7 +1,7 @@
 # ============================================
 # src/ui/editor_widget.py
 # ============================================
-from PySide6.QtWidgets import QTextEdit, QVBoxLayout, QWidget, QLabel, QFrame
+from PySide6.QtWidgets import QTextEdit, QVBoxLayout, QWidget, QLabel, QFrame, QHBoxLayout
 from PySide6.QtGui import QFont, QTextOption, QPalette, QColor
 from PySide6.QtCore import Signal, Qt
 
@@ -46,10 +46,13 @@ class EditorWidget(QWidget):
                 border-top-left-radius: 16px;
                 border-top-right-radius: 16px;
                 border-bottom: 1px solid rgba(0, 224, 255, 0.2);
-                padding: 12px 20px;
             }
         """)
-        title_layout = QVBoxLayout(title_bar)
+        
+        # 使用水平布局而不是垂直布局，并设置正确的边距
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(20, 0, 20, 0)  # 左右留出空间
+        title_layout.setAlignment(Qt.AlignVCenter)  # 垂直居中
         
         title = QLabel("✍️ Markdown 编辑器")
         title.setStyleSheet("""
@@ -58,9 +61,11 @@ class EditorWidget(QWidget):
                 font-size: 16px;
                 font-weight: 600;
                 letter-spacing: 0.5px;
+                background: transparent;
             }
         """)
         title_layout.addWidget(title)
+        title_layout.addStretch()  # 添加弹性空间
         
         # 编辑器
         self.editor = QTextEdit()
