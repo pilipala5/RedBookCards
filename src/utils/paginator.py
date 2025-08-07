@@ -315,6 +315,8 @@ class SmartPaginator:
         """
         扁平化解析所有节点，确保分页标记被正确识别
         这个方法会遍历整个DOM树，将所有内容扁平化为元素列表
+        
+        修复版本：专门处理图片标签，避免图片丢失
         """
         elements = []
         
@@ -346,15 +348,46 @@ class SmartPaginator:
                 height=0,
                 can_break=True,
                 level=999,
-                is_forced_break=True  # 标记为强制分页
+                is_forced_break=True
             ))
             return elements
         
         # 处理具体的元素类型
         tag_name = node.name.lower()
         
+        # ===== 新增：专门处理图片标签 =====
+        if tag_name == 'img':
+            # 保持img标签完整，不要丢失
+            src = node.get('src', '')
+            alt = node.get('alt', '图片')
+            
+            # 估算图片高度
+            img_height = 350  # 默认图片高度
+            if 'width' in node.attrs and 'height' in node.attrs:
+                try:
+                    # 如果有指定尺寸，按比例计算
+                    width = int(node['width'])
+                    height = int(node['height'])
+                    # 限制最大宽度为内容宽度
+                    if width > self.content_width:
+                        ratio = self.content_width / width
+                        img_height = int(height * ratio)
+                    else:
+                        img_height = height
+                except:
+                    pass
+            
+            elements.append(PageElement(
+                type='image',
+                content=str(node),  # 保留完整的img标签HTML
+                text=alt,
+                height=img_height + self.ELEMENT_HEIGHTS['margin_bottom'],
+                can_break=False  # 图片不可分割
+            ))
+            return elements
+        
         # 处理块级元素
-        if tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+        elif tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
             # 标题元素
             level = int(tag_name[1])
             text = node.get_text(strip=True)
@@ -370,63 +403,87 @@ class SmartPaginator:
             ))
             
         elif tag_name == 'p':
-            # 段落元素 - 需要检查内部是否有分页标记
-            has_pagebreak = False
-            sub_elements = []
+            # ===== 修改：段落元素需要检查是否包含图片 =====
+            imgs = node.find_all('img')
             
-            # 检查段落内部的所有子节点
-            for child in node.children:
-                if isinstance(child, Tag) and self._is_pagebreak_marker(child):
-                    has_pagebreak = True
-                    # 如果段落内有分页标记，需要特殊处理
-                    # 先保存分页标记前的内容
-                    text_before = ''.join(str(c) for c in list(node.children)[:list(node.children).index(child)])
-                    if text_before.strip():
+            if imgs:
+                # 如果段落包含图片，特殊处理
+                text = node.get_text(strip=True)
+                # 计算高度：文本高度 + 所有图片高度
+                text_height = self._calculate_paragraph_height(text)
+                img_heights = len(imgs) * 350  # 每个图片估算350px
+                total_height = text_height + img_heights
+                
+                elements.append(PageElement(
+                    type='paragraph_with_images',
+                    content=str(node),  # 保留完整HTML，包括img标签
+                    text=text,
+                    height=total_height,
+                    can_break=False  # 包含图片的段落不分割
+                ))
+            else:
+                # 普通段落，检查是否有分页标记
+                has_pagebreak = False
+                sub_elements = []
+                
+                # 检查段落内部的所有子节点
+                for child in node.children:
+                    if isinstance(child, Tag) and self._is_pagebreak_marker(child):
+                        has_pagebreak = True
+                        # 如果段落内有分页标记，需要特殊处理
+                        # 先保存分页标记前的内容
+                        text_before = ''.join(str(c) for c in list(node.children)[:list(node.children).index(child)])
+                        if text_before.strip():
+                            sub_elements.append(PageElement(
+                                type='paragraph',
+                                content=f'<p>{text_before}</p>',
+                                text=text_before,
+                                height=self._calculate_paragraph_height(text_before),
+                                can_break=True
+                            ))
+                        # 添加分页标记
                         sub_elements.append(PageElement(
+                            type='pagebreak',
+                            content='',
+                            text='',
+                            height=0,
+                            can_break=True,
+                            level=999,
+                            is_forced_break=True
+                        ))
+                
+                if has_pagebreak:
+                    elements.extend(sub_elements)
+                else:
+                    # 正常的段落
+                    text = node.get_text(strip=True)
+                    if text:
+                        height = self._calculate_paragraph_height(text)
+                        elements.append(PageElement(
                             type='paragraph',
-                            content=f'<p>{text_before}</p>',
-                            text=text_before,
-                            height=self._calculate_paragraph_height(text_before),
+                            content=str(node),
+                            text=text,
+                            height=height,
                             can_break=True
                         ))
-                    # 添加分页标记
-                    sub_elements.append(PageElement(
-                        type='pagebreak',
-                        content='',
-                        text='',
-                        height=0,
-                        can_break=True,
-                        level=999,
-                        is_forced_break=True
-                    ))
-            
-            if has_pagebreak:
-                elements.extend(sub_elements)
-            else:
-                # 正常的段落
-                text = node.get_text(strip=True)
-                if text:
-                    height = self._calculate_paragraph_height(text)
-                    elements.append(PageElement(
-                        type='paragraph',
-                        content=str(node),
-                        text=text,
-                        height=height,
-                        can_break=True
-                    ))
-                    
+                        
         elif tag_name in ['ul', 'ol']:
-            # 列表元素
+            # ===== 修改：列表元素也要检查是否包含图片 =====
             items = node.find_all('li')
+            imgs = node.find_all('img')
             text = node.get_text(strip=True)
-            height = len(items) * self.ELEMENT_HEIGHTS['li'] + self.ELEMENT_HEIGHTS['margin_bottom']
+            
+            # 计算高度
+            list_height = len(items) * self.ELEMENT_HEIGHTS['li']
+            img_height = len(imgs) * 350
+            total_height = list_height + img_height + self.ELEMENT_HEIGHTS['margin_bottom']
             
             elements.append(PageElement(
                 type='list',
-                content=str(node),
+                content=str(node),  # 保留完整HTML
                 text=text,
-                height=height,
-                can_break=len(items) > 3
+                height=total_height,
+                can_break=len(items) > 3 and len(imgs) == 0  # 有图片就不分割
             ))
             
         elif tag_name == 'pre':
@@ -446,16 +503,20 @@ class SmartPaginator:
             ))
             
         elif tag_name == 'blockquote':
-            # 引用块
+            # ===== 修改：引用块也要检查图片 =====
+            imgs = node.find_all('img')
             text = node.get_text(strip=True)
-            height = self._calculate_blockquote_height(text)
+            
+            text_height = self._calculate_blockquote_height(text)
+            img_height = len(imgs) * 350
+            total_height = text_height + img_height
             
             elements.append(PageElement(
                 type='blockquote',
-                content=str(node),
+                content=str(node),  # 保留完整HTML
                 text=text,
-                height=height,
-                can_break=True
+                height=total_height,
+                can_break=len(imgs) == 0  # 有图片就不分割
             ))
             
         elif tag_name == 'table':
@@ -487,34 +548,74 @@ class SmartPaginator:
             ))
             
         elif tag_name in ['div', 'section', 'article', 'main', 'aside', 'nav', 'header', 'footer']:
-            # 容器元素 - 递归处理子元素
+            # ===== 修改：容器元素要递归处理，但要检查是否包含图片 =====
+            # 先检查是否直接包含图片
+            direct_imgs = []
             for child in node.children:
-                elements.extend(self._flatten_parse(child))
+                if isinstance(child, Tag) and child.name.lower() == 'img':
+                    direct_imgs.append(child)
+            
+            # 如果容器直接包含图片，整体处理
+            if direct_imgs:
+                text = node.get_text(strip=True)
+                img_height = len(direct_imgs) * 350
+                text_height = self._calculate_text_height(text) if text else 0
                 
-        else:
-            # 其他元素 - 递归处理子元素
-            # 但首先检查是否有实际内容
-            text = node.get_text(strip=True)
-            if text:
-                # 检查子元素中是否有分页标记
-                for child in node.children:
-                    child_elements = self._flatten_parse(child)
-                    if child_elements:
-                        elements.extend(child_elements)
-                
-                # 如果没有子元素被解析，则将整个元素作为文本处理
-                if not elements:
-                    elements.append(PageElement(
-                        type='text',
-                        content=str(node),
-                        text=text,
-                        height=self._calculate_text_height(text),
-                        can_break=True
-                    ))
+                elements.append(PageElement(
+                    type='container_with_images',
+                    content=str(node),  # 保留完整HTML
+                    text=text,
+                    height=text_height + img_height,
+                    can_break=False
+                ))
             else:
                 # 递归处理子元素
                 for child in node.children:
                     elements.extend(self._flatten_parse(child))
+                    
+        else:
+            # ===== 修改：其他元素的处理 =====
+            # 首先检查是否包含图片
+            imgs = node.find_all('img') if hasattr(node, 'find_all') else []
+            
+            if imgs:
+                # 如果包含图片，保留完整HTML
+                text = node.get_text(strip=True)
+                img_height = len(imgs) * 350
+                text_height = self._calculate_text_height(text) if text else 0
+                
+                elements.append(PageElement(
+                    type='mixed_with_images',
+                    content=str(node),  # 重要：保留完整HTML，不要用get_text
+                    text=text,
+                    height=text_height + img_height,
+                    can_break=False
+                ))
+            else:
+                # 不包含图片的其他元素
+                text = node.get_text(strip=True)
+                if text:
+                    # 检查子元素
+                    has_content = False
+                    for child in node.children:
+                        child_elements = self._flatten_parse(child)
+                        if child_elements:
+                            elements.extend(child_elements)
+                            has_content = True
+                    
+                    # 如果没有子元素被解析，则将整个元素作为文本处理
+                    if not has_content:
+                        elements.append(PageElement(
+                            type='text',
+                            content=str(node),
+                            text=text,
+                            height=self._calculate_text_height(text),
+                            can_break=True
+                        ))
+                else:
+                    # 递归处理子元素
+                    for child in node.children:
+                        elements.extend(self._flatten_parse(child))
         
         return elements
     

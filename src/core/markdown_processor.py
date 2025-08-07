@@ -4,7 +4,8 @@
 import markdown
 from markdown.extensions import fenced_code, tables
 import re
-import uuid
+import os
+from pathlib import Path
 
 class TaskListExtension(markdown.Extension):
     """自定义任务列表扩展"""
@@ -85,22 +86,20 @@ class MarkdownProcessor:
     def parse(self, text: str) -> str:
         """解析 Markdown 文本为 HTML"""
         try:
-            # 1. 首先处理分页标记，将其转换为特殊的 HTML 标记
+            # 1. 先处理分页标记
             text = self._process_pagebreaks_before_markdown(text)
             
-            # 2. 创建新的 Markdown 实例（避免状态污染）
+            # 2. 正常让 Markdown 解析（包括图片）
             md = markdown.Markdown(
                 extensions=self.extensions,
                 extension_configs=self.extension_configs
             )
-            
-            # 3. 转换 Markdown 为 HTML
             html = md.convert(text)
             
-            # 4. 后处理：添加小红书特色 emoji 支持
-            html = self._process_emojis(html)
+            # 3. 处理本地图片路径
+            html = self._fix_local_image_paths(html)
             
-            # 5. 添加任务列表的样式支持
+            # 4. 添加任务列表样式
             html = self._add_tasklist_styles(html)
             
             return html
@@ -108,6 +107,47 @@ class MarkdownProcessor:
         except Exception as e:
             print(f"Markdown 解析错误: {e}")
             return f"<p style='color: red;'>解析错误: {str(e)}</p>"
+    
+    def _fix_local_image_paths(self, html: str) -> str:
+        """修复本地图片路径，确保能在 QWebEngineView 中显示"""
+        from bs4 import BeautifulSoup
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            if src:
+                # 处理本地文件路径
+                if not src.startswith(('http://', 'https://', 'data:', 'file:')):
+                    # 处理 Windows 路径
+                    if src.startswith('C:') or src.startswith('D:') or ':\\' in src or ':/' in src:
+                        # 这是绝对路径
+                        # 统一转换为正斜杠
+                        src = src.replace('\\', '/')
+                        # 如果路径以 C:/ 开头，转换为 file:///C:/
+                        if not src.startswith('file:'):
+                            if src[1:3] == ':/':  # 类似 C:/ 的格式
+                                src = 'file:///' + src
+                            else:
+                                src = 'file:///' + src.replace(':', '')
+                    else:
+                        # 相对路径，转换为绝对路径
+                        try:
+                            abs_path = os.path.abspath(src).replace('\\', '/')
+                            src = 'file:///' + abs_path
+                        except:
+                            pass
+                    
+                    img['src'] = src
+                    
+                # 添加一些默认属性以改善显示
+                if not img.get('style'):
+                    img['style'] = 'max-width: 100%; height: auto;'
+                
+                # 保护标记
+                img['data-protected'] = 'true'
+        
+        return str(soup)
     
     def _process_pagebreaks_before_markdown(self, text: str) -> str:
         """
@@ -124,11 +164,6 @@ class MarkdownProcessor:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         
         return text
-    
-    def _process_emojis(self, html: str) -> str:
-        """处理 emoji 表情"""
-        # 保持 emoji 原样显示
-        return html
     
     def _add_tasklist_styles(self, html: str) -> str:
         """添加任务列表的内联样式"""

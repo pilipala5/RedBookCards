@@ -1096,15 +1096,28 @@ class MainWindow(QMainWindow):
     
     def on_text_changed(self):
         """文本改变时启动计时器"""
+        # 添加更新锁，防止并发
+        if hasattr(self, '_updating') and self._updating:
+            return
+        
         self.update_timer.stop()
         self.update_timer.start()
         self.update_char_count()
     
     def update_preview(self):
         """更新预览"""
-        self.update_timer.stop()
-        markdown_text = self.editor.get_text()
-        self.preview.update_content(markdown_text)
+        self._updating = True  # 加锁
+        try:
+            self.update_timer.stop()
+            markdown_text = self.editor.get_text()
+            
+            # 添加图片检测日志
+            img_count = markdown_text.count('![')
+            print(f"检测到 {img_count} 个图片标记")
+            
+            self.preview.update_content(markdown_text)
+        finally:
+            self._updating = False  # 解锁
     
     def update_char_count(self):
         """更新字数统计"""
