@@ -3,18 +3,19 @@
 # ============================================
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag, Comment
 import re
 
 @dataclass
 class PageElement:
     """页面元素"""
-    type: str  # 'heading', 'paragraph', 'list', 'code', 'blockquote', 'table', 'hr', 'text'
+    type: str  # 'heading', 'paragraph', 'list', 'code', 'blockquote', 'table', 'hr', 'text', 'pagebreak'
     content: str  # HTML内容
     text: str  # 纯文本内容（用于计算高度）
     level: int = 0  # 标题级别或嵌套深度
     height: int = 0  # 估算高度（像素）
     can_break: bool = True  # 是否可以在此处分页
+    is_forced_break: bool = False  # 是否是强制分页（用于标记用户添加的分页符）
     
 class SmartPaginator:
     """智能分页器 - 支持多尺寸"""
@@ -83,6 +84,7 @@ class SmartPaginator:
         """
         self.elements: List[PageElement] = []
         self.set_page_size(page_size)
+        self.forced_break_pages = set()  # 记录哪些页面是通过分页符创建的
         
     def set_page_size(self, size: str):
         """设置页面尺寸"""
@@ -123,19 +125,204 @@ class SmartPaginator:
                 "sides": self.padding_sides
             }
         }
+    
+    def paginate(self, html_content: str) -> List[str]:
+        """
+        核心分页方法
         
+        Args:
+            html_content: HTML内容
+            
+        Returns:
+            分页后的HTML内容列表
+        """
+        # 重置强制分页记录
+        self.forced_break_pages = set()
+        
+        # 1. 解析HTML为元素列表
+        elements = self.parse_html_to_elements(html_content)
+        
+        if not elements:
+            return [html_content] if html_content else []
+        
+        # 2. 执行分页
+        pages = []
+        current_page_elements = []
+        current_height = 0
+        consecutive_breaks = 0  # 追踪连续的分页符数量
+        
+        i = 0
+        while i < len(elements):
+            element = elements[i]
+            
+            # 处理强制分页标记
+            if element.type == 'pagebreak':
+                consecutive_breaks += 1
+                
+                # 保存当前页（如果有内容）
+                if current_page_elements:
+                    pages.append(self._elements_to_html(current_page_elements))
+                    self.forced_break_pages.add(len(pages) - 1)  # 记录这是强制分页
+                    current_page_elements = []
+                    current_height = 0
+                elif consecutive_breaks > 1:
+                    # 如果是连续的分页符，创建空页
+                    pages.append("")
+                    self.forced_break_pages.add(len(pages) - 1)  # 记录这是强制分页创建的空页
+                
+                i += 1
+                continue
+            
+            # 非分页符元素，重置连续分页符计数
+            consecutive_breaks = 0
+            
+            # 检查是否需要分页
+            element_height = element.height
+            
+            # 特殊处理：标题元素
+            if element.type == 'heading':
+                # 检查标题后是否有足够空间放置内容
+                if current_height + element_height + self.HEADING_KEEP_WITH > self.content_height:
+                    # 需要分页，标题放到下一页
+                    if current_page_elements:
+                        pages.append(self._elements_to_html(current_page_elements))
+                        current_page_elements = []
+                        current_height = 0
+            
+            # 检查当前元素是否超出页面高度
+            if current_height + element_height > self.content_height:
+                # 检查是否可以分割元素
+                if element.type == 'paragraph' and element_height > self.content_height * 0.3:
+                    # 长段落可以尝试分割
+                    split_result = self._try_split_paragraph(element, self.content_height - current_height)
+                    if split_result:
+                        first_part, second_part = split_result
+                        if first_part:
+                            current_page_elements.append(first_part)
+                        pages.append(self._elements_to_html(current_page_elements))
+                        current_page_elements = [second_part] if second_part else []
+                        current_height = second_part.height if second_part else 0
+                    else:
+                        # 无法分割，整个元素放到下一页
+                        if current_page_elements:
+                            pages.append(self._elements_to_html(current_page_elements))
+                        current_page_elements = [element]
+                        current_height = element_height
+                else:
+                    # 不可分割的元素或不需要分割，放到下一页
+                    if current_page_elements:
+                        pages.append(self._elements_to_html(current_page_elements))
+                    current_page_elements = [element]
+                    current_height = element_height
+            else:
+                # 当前元素可以放入当前页
+                current_page_elements.append(element)
+                current_height += element_height
+            
+            i += 1
+        
+        # 3. 保存最后一页
+        if current_page_elements:
+            pages.append(self._elements_to_html(current_page_elements))
+        
+        # 4. 如果没有生成任何页面，返回原始内容
+        if not pages:
+            return [html_content]
+        
+        return pages
+    
+    def _elements_to_html(self, elements: List[PageElement]) -> str:
+        """将元素列表转换回HTML字符串"""
+        html_parts = []
+        for element in elements:
+            if element.type != 'pagebreak':  # 跳过分页标记
+                html_parts.append(element.content)
+        return '\n'.join(html_parts)
+    
+    def _try_split_paragraph(self, element: PageElement, available_height: int) -> Optional[Tuple[PageElement, PageElement]]:
+        """
+        尝试分割段落
+        
+        Args:
+            element: 要分割的段落元素
+            available_height: 当前页剩余高度
+            
+        Returns:
+            分割后的两个元素，如果无法分割则返回None
+        """
+        # 简单实现：暂不分割段落，保持段落完整性
+        # 未来可以实现更复杂的分割逻辑
+        return None
+    
+    def _calculate_text_height(self, text: str) -> int:
+        """计算纯文本高度"""
+        if not text:
+            return 0
+        
+        # 估算文本行数
+        chars_per_line = self.content_width // self.CHAR_WIDTH
+        total_chars = len(text)
+        estimated_lines = max(1, (total_chars + chars_per_line - 1) // chars_per_line)
+        
+        return self.ELEMENT_HEIGHTS['p_base'] + estimated_lines * self.ELEMENT_HEIGHTS['p_line']
+    
+    def _calculate_paragraph_height(self, text: str) -> int:
+        """计算段落高度"""
+        if not text:
+            return self.ELEMENT_HEIGHTS['p_base']
+        
+        # 考虑中英文混合
+        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+        english_chars = len(text) - chinese_chars
+        
+        # 计算平均每行字符数
+        avg_char_width = (chinese_chars * self.CHAR_WIDTH + english_chars * self.CHAR_WIDTH_EN) / max(1, len(text))
+        chars_per_line = self.content_width / avg_char_width
+        
+        # 计算行数
+        lines = max(1, int(len(text) / chars_per_line) + 1)
+        
+        return self.ELEMENT_HEIGHTS['p_base'] + lines * self.ELEMENT_HEIGHTS['p_line'] + self.ELEMENT_HEIGHTS['margin_bottom']
+    
+    def _calculate_blockquote_height(self, text: str) -> int:
+        """计算引用块高度"""
+        if not text:
+            return self.ELEMENT_HEIGHTS['blockquote']
+        
+        # 引用块内容宽度更窄
+        effective_width = self.content_width - 60  # 减去左边框和内边距
+        chars_per_line = effective_width // self.CHAR_WIDTH
+        lines = max(1, (len(text) + chars_per_line - 1) // chars_per_line)
+        
+        return self.ELEMENT_HEIGHTS['blockquote'] + lines * self.ELEMENT_HEIGHTS['blockquote_line'] + self.ELEMENT_HEIGHTS['margin_bottom']
+    
     def parse_html_to_elements(self, html: str) -> List[PageElement]:
-        """将HTML解析为页面元素列表，保持原始顺序"""
+        """
+        将HTML解析为页面元素列表，保持原始顺序
+        改进版：使用深度优先遍历，确保所有分页标记都被识别
+        """
         elements = []
         
         # 使用BeautifulSoup解析HTML
         soup = BeautifulSoup(html, 'html.parser')
         
-        # 遍历所有顶层元素
-        for element in soup.children:
-            if isinstance(element, NavigableString):
-                # 处理纯文本
-                text = str(element).strip()
+        # 深度优先遍历所有元素，扁平化处理
+        elements = self._flatten_parse(soup)
+        
+        return elements
+    
+    def _flatten_parse(self, node) -> List[PageElement]:
+        """
+        扁平化解析所有节点，确保分页标记被正确识别
+        这个方法会遍历整个DOM树，将所有内容扁平化为元素列表
+        """
+        elements = []
+        
+        # 如果是文本节点
+        if isinstance(node, NavigableString):
+            # 跳过注释和空白文本
+            if not isinstance(node, Comment):
+                text = str(node).strip()
                 if text:
                     elements.append(PageElement(
                         type='text',
@@ -144,250 +331,222 @@ class SmartPaginator:
                         height=self._calculate_text_height(text),
                         can_break=True
                     ))
-            elif isinstance(element, Tag):
-                # 处理HTML标签
-                parsed_element = self._parse_element(element)
-                if parsed_element:
-                    elements.append(parsed_element)
+            return elements
         
-        return elements
-    
-    def _parse_element(self, element: Tag) -> Optional[PageElement]:
-        """解析单个HTML元素"""
-        tag_name = element.name.lower()
+        # 如果不是Tag，返回空列表
+        if not isinstance(node, Tag):
+            return elements
         
-        # 标题元素
+        # 首先检查是否是分页标记
+        if self._is_pagebreak_marker(node):
+            elements.append(PageElement(
+                type='pagebreak',
+                content='',
+                text='',
+                height=0,
+                can_break=True,
+                level=999,
+                is_forced_break=True  # 标记为强制分页
+            ))
+            return elements
+        
+        # 处理具体的元素类型
+        tag_name = node.name.lower()
+        
+        # 处理块级元素
         if tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            # 标题元素
             level = int(tag_name[1])
-            text = element.get_text(strip=True)
+            text = node.get_text(strip=True)
             height = self.ELEMENT_HEIGHTS[tag_name] + self.ELEMENT_HEIGHTS['margin_bottom']
             
-            return PageElement(
+            elements.append(PageElement(
                 type='heading',
-                content=str(element),
+                content=str(node),
                 text=text,
                 level=level,
                 height=height,
-                can_break=False  # 标题前不分页
-            )
-        
-        # 段落
-        elif tag_name == 'p':
-            text = element.get_text(strip=True)
-            if not text:
-                return None
-                
-            height = self._calculate_paragraph_height(text)
+                can_break=False
+            ))
             
-            return PageElement(
-                type='paragraph',
-                content=str(element),
-                text=text,
-                height=height,
-                can_break=True
-            )
-        
-        # 列表
+        elif tag_name == 'p':
+            # 段落元素 - 需要检查内部是否有分页标记
+            has_pagebreak = False
+            sub_elements = []
+            
+            # 检查段落内部的所有子节点
+            for child in node.children:
+                if isinstance(child, Tag) and self._is_pagebreak_marker(child):
+                    has_pagebreak = True
+                    # 如果段落内有分页标记，需要特殊处理
+                    # 先保存分页标记前的内容
+                    text_before = ''.join(str(c) for c in list(node.children)[:list(node.children).index(child)])
+                    if text_before.strip():
+                        sub_elements.append(PageElement(
+                            type='paragraph',
+                            content=f'<p>{text_before}</p>',
+                            text=text_before,
+                            height=self._calculate_paragraph_height(text_before),
+                            can_break=True
+                        ))
+                    # 添加分页标记
+                    sub_elements.append(PageElement(
+                        type='pagebreak',
+                        content='',
+                        text='',
+                        height=0,
+                        can_break=True,
+                        level=999,
+                        is_forced_break=True
+                    ))
+            
+            if has_pagebreak:
+                elements.extend(sub_elements)
+            else:
+                # 正常的段落
+                text = node.get_text(strip=True)
+                if text:
+                    height = self._calculate_paragraph_height(text)
+                    elements.append(PageElement(
+                        type='paragraph',
+                        content=str(node),
+                        text=text,
+                        height=height,
+                        can_break=True
+                    ))
+                    
         elif tag_name in ['ul', 'ol']:
-            items = element.find_all('li')
-            text = element.get_text(strip=True)
+            # 列表元素
+            items = node.find_all('li')
+            text = node.get_text(strip=True)
             height = len(items) * self.ELEMENT_HEIGHTS['li'] + self.ELEMENT_HEIGHTS['margin_bottom']
             
-            return PageElement(
+            elements.append(PageElement(
                 type='list',
-                content=str(element),
+                content=str(node),
                 text=text,
                 height=height,
-                can_break=len(items) > 3  # 列表项多于3个时可以分页
-            )
-        
-        # 代码块
+                can_break=len(items) > 3
+            ))
+            
         elif tag_name == 'pre':
-            text = element.get_text()
+            # 代码块
+            text = node.get_text()
             lines = text.count('\n') + 1
             height = (self.ELEMENT_HEIGHTS['code_block'] + 
-                     lines * self.ELEMENT_HEIGHTS['code_line'] +
-                     self.ELEMENT_HEIGHTS['margin_bottom'])
+                    lines * self.ELEMENT_HEIGHTS['code_line'] +
+                    self.ELEMENT_HEIGHTS['margin_bottom'])
             
-            return PageElement(
+            elements.append(PageElement(
                 type='code',
-                content=str(element),
+                content=str(node),
                 text=text,
                 height=height,
-                can_break=lines > 10  # 代码超过10行可以考虑分页
-            )
-        
-        # 引用
+                can_break=lines > 10
+            ))
+            
         elif tag_name == 'blockquote':
-            text = element.get_text(strip=True)
+            # 引用块
+            text = node.get_text(strip=True)
             height = self._calculate_blockquote_height(text)
             
-            return PageElement(
+            elements.append(PageElement(
                 type='blockquote',
-                content=str(element),
+                content=str(node),
                 text=text,
                 height=height,
                 can_break=True
-            )
-        
-        # 表格
+            ))
+            
         elif tag_name == 'table':
-            rows = element.find_all('tr')
-            headers = element.find_all('th')
-            text = element.get_text(strip=True)
+            # 表格
+            rows = node.find_all('tr')
+            headers = node.find_all('th')
+            text = node.get_text(strip=True)
             
             height = (len(headers) * self.ELEMENT_HEIGHTS['table_header'] +
-                     (len(rows) - len(headers)) * self.ELEMENT_HEIGHTS['table_row'] +
-                     self.ELEMENT_HEIGHTS['margin_bottom'])
+                    (len(rows) - len(headers)) * self.ELEMENT_HEIGHTS['table_row'] +
+                    self.ELEMENT_HEIGHTS['margin_bottom'])
             
-            return PageElement(
+            elements.append(PageElement(
                 type='table',
-                content=str(element),
+                content=str(node),
                 text=text,
                 height=height,
-                can_break=len(rows) > 5  # 表格行数多于5行时可以分页
-            )
-        
-        # 分隔线
+                can_break=len(rows) > 5
+            ))
+            
         elif tag_name == 'hr':
-            return PageElement(
+            # 分隔线
+            elements.append(PageElement(
                 type='hr',
-                content=str(element),
+                content=str(node),
                 text='',
                 height=self.ELEMENT_HEIGHTS['hr'],
                 can_break=True
-            )
-        
-        # 其他块级元素
-        elif tag_name in ['div', 'section', 'article']:
-            # 递归处理子元素
-            sub_elements = []
-            for child in element.children:
-                if isinstance(child, Tag):
-                    parsed = self._parse_element(child)
-                    if parsed:
-                        sub_elements.append(parsed)
+            ))
             
-            # 如果有子元素，返回第一个（简化处理）
-            if sub_elements:
-                return sub_elements[0]
-        
-        return None
-    
-    def _calculate_text_height(self, text: str) -> int:
-        """计算纯文本高度"""
-        lines = self._estimate_lines(text)
-        return self.ELEMENT_HEIGHTS['p_base'] + lines * self.ELEMENT_HEIGHTS['p_line']
-    
-    def _calculate_paragraph_height(self, text: str) -> int:
-        """计算段落高度"""
-        lines = self._estimate_lines(text)
-        height = self.ELEMENT_HEIGHTS['p_base'] + lines * self.ELEMENT_HEIGHTS['p_line']
-        return height + self.ELEMENT_HEIGHTS['margin_bottom']
-    
-    def _calculate_blockquote_height(self, text: str) -> int:
-        """计算引用块高度"""
-        lines = self._estimate_lines(text, width_reduction=100)  # 引用有缩进
-        height = self.ELEMENT_HEIGHTS['blockquote'] + lines * self.ELEMENT_HEIGHTS['blockquote_line']
-        return height + self.ELEMENT_HEIGHTS['margin_bottom']
-    
-    def _estimate_lines(self, text: str, width_reduction: int = 0) -> int:
-        """估算文本行数 - 根据页面宽度动态计算"""
-        if not text:
-            return 1
-        
-        # 计算可用宽度（使用动态内容宽度）
-        available_width = self.content_width - width_reduction
-        
-        # 粗略估算：中英文混合
-        # 统计中文字符数
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fa5]', text))
-        english_chars = len(text) - chinese_chars
-        
-        # 计算总宽度
-        total_width = (chinese_chars * self.CHAR_WIDTH + 
-                      english_chars * self.CHAR_WIDTH_EN)
-        
-        # 计算行数
-        lines = max(1, int(total_width / available_width) + 1)
-        
-        # 考虑强制换行
-        forced_breaks = text.count('\n')
-        
-        return lines + forced_breaks
-    
-    def paginate(self, html_content: str) -> List[str]:
-        """执行智能分页"""
-        # 如果内容很短，直接返回
-        if not html_content or len(html_content.strip()) < 100:
-            return [html_content] if html_content else ['<p>无内容</p>']
-        
-        # 解析HTML为元素
-        elements = self.parse_html_to_elements(html_content)
-        if not elements:
-            return [html_content]
-        
-        pages = []
-        current_page_elements = []
-        current_height = 0
-        
-        for i, element in enumerate(elements):
-            # 检查是否需要新页面
-            need_new_page = False
-            
-            # 1. 基础高度检查（使用动态内容高度）
-            if current_height + element.height > self.content_height:
-                need_new_page = True
-            
-            # 2. 标题关联检查（避免标题孤立）
-            if element.type == 'heading':
-                # 检查标题后是否有足够空间放置内容
-                remaining_height = self.content_height - current_height - element.height
+        elif tag_name in ['div', 'section', 'article', 'main', 'aside', 'nav', 'header', 'footer']:
+            # 容器元素 - 递归处理子元素
+            for child in node.children:
+                elements.extend(self._flatten_parse(child))
                 
-                if remaining_height < self.HEADING_KEEP_WITH:
-                    # 剩余空间不足，将标题移到下一页
-                    need_new_page = True
+        else:
+            # 其他元素 - 递归处理子元素
+            # 但首先检查是否有实际内容
+            text = node.get_text(strip=True)
+            if text:
+                # 检查子元素中是否有分页标记
+                for child in node.children:
+                    child_elements = self._flatten_parse(child)
+                    if child_elements:
+                        elements.extend(child_elements)
                 
-                # 如果是第一个元素且不是第一页，不要分页
-                if not current_page_elements and pages:
-                    need_new_page = False
-            
-            # 3. 段落完整性检查
-            if element.type == 'paragraph' and current_page_elements:
-                # 如果段落太大，且当前页已有内容，考虑分页
-                if element.height > self.content_height * 0.6 and current_height > self.content_height * 0.3:
-                    need_new_page = True
-            
-            # 4. 避免页面过空（根据页面尺寸调整阈值）
-            min_fill_ratio = 0.25 if self.page_size_name == "small" else 0.3
-            if need_new_page and current_height < self.content_height * min_fill_ratio:
-                # 如果当前页面填充不足，尽量不分页
-                if element.can_break or element.height < self.content_height * 0.5:
-                    need_new_page = False
-            
-            # 创建新页面
-            if need_new_page and current_page_elements:
-                page_html = ''.join([e.content for e in current_page_elements])
-                pages.append(page_html)
-                current_page_elements = []
-                current_height = 0
-            
-            # 添加元素到当前页
-            current_page_elements.append(element)
-            current_height += element.height
+                # 如果没有子元素被解析，则将整个元素作为文本处理
+                if not elements:
+                    elements.append(PageElement(
+                        type='text',
+                        content=str(node),
+                        text=text,
+                        height=self._calculate_text_height(text),
+                        can_break=True
+                    ))
+            else:
+                # 递归处理子元素
+                for child in node.children:
+                    elements.extend(self._flatten_parse(child))
         
-        # 添加最后一页
-        if current_page_elements:
-            page_html = ''.join([e.content for e in current_page_elements])
-            pages.append(page_html)
+        return elements
+    
+    def _is_pagebreak_marker(self, element: Tag) -> bool:
+        """
+        检查元素是否是分页标记
+        支持多种识别方式
+        """
+        if not isinstance(element, Tag):
+            return False
+            
+        # 检查是否是带有特定class的div
+        if element.name.lower() == 'div':
+            classes = element.get('class', [])
+            if isinstance(classes, str):
+                classes = classes.split()
+            
+            # 检查class名
+            if 'pagebreak-marker' in classes:
+                return True
+            
+            # 检查data属性
+            if element.get('data-pagebreak') == 'true':
+                return True
         
-        # 优化分页结果
-        pages = self.optimize_pages(pages)
-        
-        return pages if pages else [html_content]
+        return False
     
     def optimize_pages(self, pages: List[str]) -> List[str]:
-        """优化分页结果，合并过短的页面"""
+        """
+        优化分页结果，合并过短的页面
+        修改：保留通过分页符创建的页面，即使是空页
+        """
         if len(pages) <= 1:
             return pages
         
@@ -400,26 +559,46 @@ class SmartPaginator:
         while i < len(pages):
             current_page = pages[i]
             
+            # 检查当前页是否是通过分页符创建的
+            is_forced_page = i in self.forced_break_pages
+            
+            # 如果是强制分页创建的页面，直接保留（即使是空页）
+            if is_forced_page:
+                optimized.append(current_page)
+                i += 1
+                continue
+            
+            # 非强制分页的页面，进行常规优化
+            # 过滤掉完全空的页面
+            if not current_page or not current_page.strip():
+                i += 1
+                continue
+            
             # 估算当前页面高度
             current_elements = self.parse_html_to_elements(current_page)
             current_height = sum(e.height for e in current_elements)
             
-            # 如果页面过短，尝试与下一页合并
+            # 如果页面过短，尝试与下一页合并（但不合并强制分页的页面）
             if current_height < self.content_height * merge_threshold and i < len(pages) - 1:
-                next_page = pages[i + 1]
-                next_elements = self.parse_html_to_elements(next_page)
-                next_height = sum(e.height for e in next_elements)
-                
-                # 如果合并后不超过最大高度，则合并
-                if current_height + next_height <= self.content_height:
-                    optimized.append(current_page + next_page)
-                    i += 2  # 跳过下一页
-                    continue
+                next_page_index = i + 1
+                # 检查下一页是否是强制分页
+                if next_page_index not in self.forced_break_pages:
+                    next_page = pages[next_page_index]
+                    if next_page and next_page.strip():  # 确保下一页有内容
+                        next_elements = self.parse_html_to_elements(next_page)
+                        next_height = sum(e.height for e in next_elements)
+                        
+                        # 如果合并后不超过最大高度，则合并
+                        if current_height + next_height <= self.content_height:
+                            optimized.append(current_page + next_page)
+                            i += 2  # 跳过下一页
+                            continue
             
             optimized.append(current_page)
             i += 1
         
-        return optimized if optimized else pages
+        # 如果优化后没有页面，至少返回一个页面
+        return optimized if optimized else ['']
     
     def debug_pagination(self, html_content: str) -> List[dict]:
         """调试分页，返回详细信息"""
@@ -439,6 +618,7 @@ class SmartPaginator:
                 'total_height': total_height,
                 'max_height': self.content_height,
                 'fill_rate': f"{(total_height / self.content_height * 100):.1f}%",
+                'is_forced_break': (i-1) in self.forced_break_pages,  # 标记是否是强制分页
                 'elements': [
                     {
                         'type': e.type,

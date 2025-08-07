@@ -1,16 +1,56 @@
 # ============================================
-# src/ui/preview_widget.py
+# src/ui/preview_widget.py - Qt兼容优化版（修复导出后模式问题）
 # ============================================
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QFrame, 
                                QPushButton, QHBoxLayout, QProgressDialog,
-                               QMessageBox, QScrollArea, QSlider, QComboBox)
+                               QMessageBox, QComboBox, QButtonGroup, QRadioButton,
+                               QScrollArea)
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtCore import QUrl, QTimer, Signal, Qt, QSize
+from PySide6.QtCore import QUrl, QTimer, Signal, Qt, QSize, QEvent
+from PySide6.QtGui import QWheelEvent, QFont
 from pathlib import Path
 from src.core.markdown_processor import MarkdownProcessor
 from src.core.html_generator import HTMLGenerator
 from src.utils.paginator import SmartPaginator
 from src.utils.exporter import ImageExporter
+
+class CustomScrollArea(QScrollArea):
+    """自定义滚动区域，处理滚轮事件"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.preview_widget = None  # 将在PreviewWidget中设置
+        
+    def wheelEvent(self, event: QWheelEvent):
+        """重写滚轮事件"""
+        if self.preview_widget:
+            # 适应窗口模式：滚轮翻页
+            if self.preview_widget.preview_mode == "fit":
+                if event.angleDelta().y() > 0:
+                    self.preview_widget.prev_page()
+                else:
+                    self.preview_widget.next_page()
+                event.accept()
+                return
+            
+            # 实际大小模式：检查是否按住Shift进行横向滚动
+            elif self.preview_widget.preview_mode == "actual":
+                # 如果按住Shift键，实现横向滚动
+                if event.modifiers() == Qt.ShiftModifier:
+                    # 获取滚动距离
+                    delta = event.angleDelta().y()
+                    # 横向滚动
+                    h_scrollbar = self.horizontalScrollBar()
+                    h_scrollbar.setValue(h_scrollbar.value() - delta)
+                    event.accept()
+                    return
+                else:
+                    # 正常的垂直滚动
+                    super().wheelEvent(event)
+                    return
+        
+        # 默认处理
+        super().wheelEvent(event)
 
 class PreviewWidget(QWidget):
     pageChanged = Signal(int, int)  # 当前页，总页数
@@ -22,8 +62,9 @@ class PreviewWidget(QWidget):
         self.current_page = 1
         self.total_pages = 1
         self.markdown_text = ""  # 保存原始markdown文本
-        self.current_zoom = 1.0  # 当前缩放比例
         self.current_size = "medium"  # 当前页面尺寸
+        self.preview_mode = "fit"  # 预览模式: fit(适应窗口) 或 actual(实际大小)
+        self._is_exporting = False  # 添加导出状态标志
         
         # 初始化处理器
         self.markdown_processor = MarkdownProcessor()
@@ -36,41 +77,37 @@ class PreviewWidget(QWidget):
         # 设置导出器
         self.setup_exporter()
         
-        # 延迟设置初始缩放，确保所有组件都已初始化
-        QTimer.singleShot(500, self.zoom_to_100)
-        
     def init_ui(self):
         """初始化UI"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        # 创建容器框架
+        # 创建容器框架 - 移除重复的标题栏
         container = QFrame()
         container.setStyleSheet("""
             QFrame {
-                background: rgba(25, 25, 40, 0.95);
-                border: 1px solid rgba(0, 224, 255, 0.2);
-                border-radius: 16px;
+                background: transparent;
+                border: none;
             }
         """)
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
         
-        # 创建标题栏
-        title_bar = self.create_title_bar()
+        # 创建顶部控制栏（包含尺寸和模式选择）
+        top_control_bar = self.create_top_control_bar()
         
-        # 创建滚动区域和WebView
-        self.create_web_view()
+        # 创建WebView容器
+        self.create_web_view_container()
         
-        # 创建控制栏
-        control_bar = self.create_control_bar()
+        # 创建底部导航控制栏
+        bottom_control_bar = self.create_bottom_control_bar()
         
         # 组装布局
-        container_layout.addWidget(title_bar)
-        container_layout.addWidget(self.scroll_area, 1)
-        container_layout.addWidget(control_bar)
+        container_layout.addWidget(top_control_bar)
+        container_layout.addWidget(self.web_container, 1)
+        container_layout.addWidget(bottom_control_bar)
         
         layout.addWidget(container)
         
@@ -80,301 +117,244 @@ class PreviewWidget(QWidget):
         # 初始化按钮状态
         self.update_buttons()
     
-    def create_title_bar(self):
-        """创建标题栏"""
-        title_bar = QFrame()
-        title_bar.setFixedHeight(50)
-        title_bar.setStyleSheet("""
+    def create_top_control_bar(self):
+        """创建顶部控制栏 - Qt兼容样式"""
+        control_bar = QFrame()
+        control_bar.setFixedHeight(50)
+        control_bar.setStyleSheet("""
             QFrame {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 0,
-                    stop: 0 rgba(0, 224, 255, 0.1),
-                    stop: 0.5 rgba(0, 150, 255, 0.15),
-                    stop: 1 rgba(0, 224, 255, 0.1)
-                );
+                background: rgba(30, 30, 50, 0.8);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.15);
                 border-top-left-radius: 16px;
                 border-top-right-radius: 16px;
-                border-bottom: 1px solid rgba(0, 224, 255, 0.2);
             }
         """)
         
-        # 使用水平布局，设置正确的边距
-        title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(20, 5, 20, 5)
-        title_layout.setSpacing(10)
+        layout = QHBoxLayout(control_bar)
+        layout.setContentsMargins(20, 10, 20, 10)
+        layout.setSpacing(20)
         
-        # 标题
-        title = QLabel("👀 实时预览")
-        title.setStyleSheet("""
-            QLabel {
-                color: #00e0ff;
-                font-size: 16px;
-                font-weight: 600;
-                letter-spacing: 0.5px;
-                background: transparent;
-            }
-        """)
+        # 尺寸选择部分
+        size_container = QWidget()
+        size_layout = QHBoxLayout(size_container)
+        size_layout.setContentsMargins(0, 0, 0, 0)
+        size_layout.setSpacing(10)
         
-        # 尺寸选择标签
         size_label = QLabel("尺寸:")
         size_label.setStyleSheet("""
             QLabel {
-                color: #8a92a6;
-                font-size: 12px;
-                background: transparent;
-            }
-        """)
-        
-        # 尺寸选择下拉框
-        self.size_selector = QComboBox()
-        self.size_selector.addItems(["小尺寸 (720×960)", "中尺寸 (1080×1440)", "大尺寸 (1440×1920)"])
-        self.size_selector.setCurrentIndex(1)
-        self.size_selector.setFixedWidth(150)
-        self.size_selector.setStyleSheet("""
-            QComboBox {
-                background: rgba(0, 224, 255, 0.1);
-                border: 1px solid rgba(0, 224, 255, 0.3);
-                color: #00e0ff;
-                padding: 5px 10px;
-                border-radius: 6px;
-                font-size: 12px;
+                color: rgba(255, 255, 255, 0.8);
+                font-size: 13px;
                 font-weight: 500;
             }
-            QComboBox:hover {
-                background: rgba(0, 224, 255, 0.15);
-                border: 1px solid rgba(0, 224, 255, 0.5);
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 20px;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 5px solid #00e0ff;
-                margin-right: 5px;
-            }
-            QComboBox QAbstractItemView {
-                background: rgba(25, 25, 40, 0.98);
-                border: 1px solid rgba(0, 224, 255, 0.3);
-                color: #00e0ff;
-                selection-background-color: rgba(0, 224, 255, 0.2);
-                outline: none;
-            }
         """)
         
-        # 页面信息标签
-        self.page_info_label = QLabel("")
-        self.page_info_label.setStyleSheet("""
+        self.size_selector = QComboBox()
+        self.size_selector.addItems(["Small (720×960)", "Medium (1080×1440)", "Large (1440×1920)"])
+        self.size_selector.setCurrentIndex(1)
+        self.size_selector.setFixedWidth(160)
+        self.size_selector.setStyleSheet(self.get_combobox_style_qt())
+        
+        size_layout.addWidget(size_label)
+        size_layout.addWidget(self.size_selector)
+        
+        # 预览模式部分
+        mode_container = QWidget()
+        mode_layout = QHBoxLayout(mode_container)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(10)
+        
+        mode_label = QLabel("模式:")
+        mode_label.setStyleSheet("""
             QLabel {
-                color: #8a92a6;
-                font-size: 12px;
-                padding: 0 10px;
-                background: transparent;
+                color: rgba(255, 255, 255, 0.8);
+                font-size: 13px;
+                font-weight: 500;
             }
         """)
         
-        # 缩放显示标签
-        self.zoom_label = QLabel("100%")
-        self.zoom_label.setStyleSheet("""
-            QLabel {
-                color: #8a92a6;
-                font-size: 12px;
-                padding: 0 10px;
-                background: transparent;
-            }
-        """)
+        self.mode_group = QButtonGroup()
         
-        # 组装标题栏
-        title_layout.addWidget(title)
-        title_layout.addSpacing(20)
-        title_layout.addWidget(size_label)
-        title_layout.addWidget(self.size_selector)
-        title_layout.addWidget(self.page_info_label)
-        title_layout.addStretch()
-        title_layout.addWidget(self.zoom_label)
+        self.fit_mode_btn = QRadioButton("适应窗口")
+        self.fit_mode_btn.setChecked(True)
+        self.fit_mode_btn.setStyleSheet(self.get_radio_style_qt())
         
-        return title_bar
+        self.actual_mode_btn = QRadioButton("实际大小")
+        self.actual_mode_btn.setStyleSheet(self.get_radio_style_qt())
+        
+        self.mode_group.addButton(self.fit_mode_btn, 0)
+        self.mode_group.addButton(self.actual_mode_btn, 1)
+        
+        mode_layout.addWidget(mode_label)
+        mode_layout.addWidget(self.fit_mode_btn)
+        mode_layout.addWidget(self.actual_mode_btn)
+        
+        # 组装顶部控制栏
+        layout.addWidget(size_container)
+        layout.addSpacing(30)
+        layout.addWidget(mode_container)
+        layout.addStretch()
+        
+        return control_bar
     
-    def create_web_view(self):
-        """创建WebView和滚动区域"""
-        # 创建滚动区域
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setStyleSheet("""
+    def create_web_view_container(self):
+        """创建WebView容器 - Qt兼容样式"""
+        # 使用自定义滚动区域
+        self.web_container = CustomScrollArea()
+        self.web_container.preview_widget = self  # 设置引用
+        
+        self.web_container.setStyleSheet("""
             QScrollArea {
                 border: none;
-                background: #1a1a2e;
+                background: rgba(20, 20, 40, 0.4);
             }
+            
             QScrollBar:vertical {
-                background: rgba(20, 20, 35, 0.5);
+                background: rgba(255, 255, 255, 0.03);
                 width: 12px;
                 border-radius: 6px;
-                margin: 5px;
+                margin: 4px;
             }
+            
             QScrollBar::handle:vertical {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 rgba(0, 224, 255, 0.4),
-                    stop: 1 rgba(0, 150, 255, 0.3)
-                );
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 rgba(0, 255, 255, 0.3),
+                    stop: 1 rgba(255, 0, 255, 0.3));
                 border-radius: 6px;
                 min-height: 30px;
             }
+            
             QScrollBar::handle:vertical:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 rgba(0, 224, 255, 0.6),
-                    stop: 1 rgba(0, 150, 255, 0.5)
-                );
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                    stop: 0 rgba(0, 255, 255, 0.5),
+                    stop: 1 rgba(255, 0, 255, 0.5));
             }
+            
             QScrollBar::add-line:vertical,
             QScrollBar::sub-line:vertical {
-                border: none;
-                background: none;
-                height: 0;
+                height: 0px;
             }
+            
             QScrollBar:horizontal {
-                background: rgba(20, 20, 35, 0.5);
+                background: rgba(255, 255, 255, 0.03);
                 height: 12px;
                 border-radius: 6px;
-                margin: 5px;
+                margin: 4px;
             }
+            
             QScrollBar::handle:horizontal {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 0,
-                    stop: 0 rgba(0, 224, 255, 0.4),
-                    stop: 1 rgba(0, 150, 255, 0.3)
-                );
+                background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 rgba(0, 255, 255, 0.3),
+                    stop: 1 rgba(255, 0, 255, 0.3));
                 border-radius: 6px;
                 min-width: 30px;
             }
+            
             QScrollBar::handle:horizontal:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 0,
-                    stop: 0 rgba(0, 224, 255, 0.6),
-                    stop: 1 rgba(0, 150, 255, 0.5)
-                );
+                background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 rgba(0, 255, 255, 0.5),
+                    stop: 1 rgba(255, 0, 255, 0.5));
             }
+            
             QScrollBar::add-line:horizontal,
             QScrollBar::sub-line:horizontal {
-                border: none;
-                background: none;
-                width: 0;
-            }
-        """)
-        
-        # 创建容器widget
-        self.web_container = QWidget()
-        self.web_container.setStyleSheet("""
-            QWidget {
-                background: #1a1a2e;
+                width: 0px;
             }
         """)
         
         # 创建WebView
-        self.web_view = QWebEngineView(self.web_container)
-        self.update_web_view_size()
+        self.web_view = QWebEngineView()
         self.web_view.setStyleSheet("""
             QWebEngineView {
                 border: none;
-                background: white;
-            }
-        """)
-        
-        # 禁用WebView的滚动条
-        self.web_view.page().settings().setAttribute(
-            self.web_view.page().settings().WebAttribute.ShowScrollBars, False
-        )
-        
-        # 设置滚动区域
-        self.scroll_area.setWidget(self.web_container)
-        self.scroll_area.setWidgetResizable(False)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-    
-    def create_control_bar(self):
-        """创建控制栏"""
-        control_bar = QFrame()
-        control_bar.setFixedHeight(60)
-        control_bar.setStyleSheet("""
-            QFrame {
-                background: rgba(20, 20, 35, 0.8);
-                border-bottom-left-radius: 16px;
-                border-bottom-right-radius: 16px;
-                border-top: 1px solid rgba(0, 224, 255, 0.1);
-            }
-        """)
-        
-        # 使用水平布局，设置边距
-        control_layout = QHBoxLayout(control_bar)
-        control_layout.setContentsMargins(20, 12, 20, 12)
-        control_layout.setSpacing(15)
-        
-        # 上一页按钮
-        self.prev_btn = QPushButton("⬅ 上一页")
-        self.prev_btn.setFixedSize(100, 36)
-        self.prev_btn.setStyleSheet(self.get_button_style())
-        
-        # 缩放标签
-        zoom_text_label = QLabel("缩放:")
-        zoom_text_label.setStyleSheet("""
-            QLabel {
-                color: #8a92a6;
-                font-size: 13px;
                 background: transparent;
             }
         """)
         
-        # 缩放滑块
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setRange(25, 200)
-        self.zoom_slider.setValue(100)
-        self.zoom_slider.setFixedWidth(200)
-        self.zoom_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: rgba(0, 224, 255, 0.2);
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                width: 18px;
-                height: 18px;
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #00e0ff,
-                    stop: 1 #0096ff
-                );
-                border-radius: 9px;
-                margin: -6px 0;
-            }
-            QSlider::handle:horizontal:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 #00f0ff,
-                    stop: 1 #00a6ff
-                );
+        # 禁用WebView自身的滚动条和鼠标交互（在实际大小模式下）
+        self.web_view.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.web_view.setFocusPolicy(Qt.StrongFocus)
+        
+        # 设置滚动区域
+        self.web_container.setWidget(self.web_view)
+        self.web_container.setWidgetResizable(True)
+        self.web_container.setAlignment(Qt.AlignCenter)
+        
+        # 默认设置为适应窗口模式
+        self.web_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.web_container.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    
+    def create_bottom_control_bar(self):
+        """创建底部导航控制栏 - Qt兼容样式"""
+        control_bar = QFrame()
+        control_bar.setFixedHeight(60)
+        control_bar.setStyleSheet("""
+            QFrame {
+                background: rgba(20, 20, 40, 0.8);
+                border-bottom-left-radius: 16px;
+                border-bottom-right-radius: 16px;
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
             }
         """)
         
-        # 缩放100%按钮
-        self.zoom_100_btn = QPushButton("📐 100%")
-        self.zoom_100_btn.setFixedSize(80, 36)
-        self.zoom_100_btn.setStyleSheet(self.get_button_style())
+        control_layout = QHBoxLayout(control_bar)
+        control_layout.setContentsMargins(20, 12, 20, 12)
+        control_layout.setSpacing(15)
+        
+        # 创建中心控制区容器
+        center_controls = QWidget()
+        center_layout = QHBoxLayout(center_controls)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(15)
+        
+        # 上一页按钮
+        self.prev_btn = QPushButton("⬅ Previous")
+        self.prev_btn.setFixedSize(110, 36)
+        self.prev_btn.setStyleSheet(self.get_button_style_qt())
+        
+        # 页面信息标签
+        self.page_info_label = QLabel("Page 1")
+        self.page_info_label.setStyleSheet("""
+            QLabel {
+                color: #00ff88;
+                font-size: 14px;
+                font-weight: 600;
+                padding: 8px 20px;
+                background: rgba(0, 255, 136, 0.1);
+                border: 1px solid rgba(0, 255, 136, 0.3);
+                border-radius: 18px;
+                min-width: 100px;
+            }
+        """)
+        self.page_info_label.setAlignment(Qt.AlignCenter)
         
         # 下一页按钮
-        self.next_btn = QPushButton("下一页 ➡")
-        self.next_btn.setFixedSize(100, 36)
-        self.next_btn.setStyleSheet(self.get_button_style())
+        self.next_btn = QPushButton("Next ➡")
+        self.next_btn.setFixedSize(110, 36)
+        self.next_btn.setStyleSheet(self.get_button_style_qt())
         
-        # 组装控制栏 - 居中布局
-        control_layout.addWidget(self.prev_btn)
-        control_layout.addStretch(1)
-        control_layout.addWidget(zoom_text_label)
-        control_layout.addWidget(self.zoom_slider)
-        control_layout.addWidget(self.zoom_100_btn)
-        control_layout.addStretch(1)
-        control_layout.addWidget(self.next_btn)
+        # 组装中心控制区
+        center_layout.addWidget(self.prev_btn)
+        center_layout.addWidget(self.page_info_label)
+        center_layout.addWidget(self.next_btn)
+        
+        # 快捷提示
+        tips_label = QLabel("💡 滚轮：上下导航 • Shift+滚轮：左右滚动")
+        tips_label.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 0.5);
+                font-size: 11px;
+                font-style: italic;
+                background: transparent;
+            }
+        """)
+        tips_label.setFont(QFont("Arial", 10))
+        
+        # 组装控制栏
+        control_layout.addStretch()
+        control_layout.addWidget(center_controls)
+        control_layout.addStretch()
+        control_layout.addWidget(tips_label)
         
         return control_bar
     
@@ -382,47 +362,55 @@ class PreviewWidget(QWidget):
         """连接信号"""
         self.prev_btn.clicked.connect(self.prev_page)
         self.next_btn.clicked.connect(self.next_page)
-        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
-        self.zoom_100_btn.clicked.connect(self.zoom_to_100)
         self.size_selector.currentIndexChanged.connect(self.on_size_changed)
+        self.mode_group.buttonClicked.connect(self.on_mode_changed)
     
-    def get_button_style(self) -> str:
-        """获取按钮样式"""
-        return """
-            QPushButton {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 rgba(0, 224, 255, 0.15),
-                    stop: 1 rgba(0, 150, 255, 0.1)
-                );
-                border: 1px solid rgba(0, 224, 255, 0.4);
-                color: #00e0ff;
-                padding: 8px 16px;
-                border-radius: 8px;
-                font-weight: 600;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 rgba(0, 224, 255, 0.25),
-                    stop: 1 rgba(0, 150, 255, 0.2)
-                );
-                border: 1px solid rgba(0, 224, 255, 0.6);
-            }
-            QPushButton:pressed {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 0, y2: 1,
-                    stop: 0 rgba(0, 224, 255, 0.35),
-                    stop: 1 rgba(0, 150, 255, 0.3)
-                );
-            }
-            QPushButton:disabled {
-                background: rgba(30, 30, 45, 0.5);
-                border-color: rgba(100, 100, 120, 0.3);
-                color: rgba(100, 100, 120, 0.5);
-            }
-        """
+    def keyPressEvent(self, event):
+        """处理键盘事件"""
+        if event.key() == Qt.Key_PageUp:
+            self.prev_page()
+        elif event.key() == Qt.Key_PageDown:
+            self.next_page()
+        elif event.key() == Qt.Key_Home:
+            self.go_to_page(1)
+        elif event.key() == Qt.Key_End:
+            self.go_to_page(self.total_pages)
+        else:
+            super().keyPressEvent(event)
+    
+    def on_mode_changed(self):
+        """处理预览模式改变"""
+        # 如果正在导出，不允许切换模式
+        if self._is_exporting:
+            return
+            
+        if self.fit_mode_btn.isChecked():
+            self.preview_mode = "fit"
+            # 适应窗口模式：隐藏滚动条，启用自适应
+            self.web_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.web_container.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.web_container.setWidgetResizable(True)
+            
+            # 清除 WebView 的固定尺寸限制
+            self.web_view.setMinimumSize(0, 0)
+            self.web_view.setMaximumSize(16777215, 16777215)
+            
+            # 在适应模式下，WebView不需要处理鼠标事件
+            self.web_view.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            
+        else:
+            self.preview_mode = "actual"
+            # 实际大小模式：显示滚动条
+            self.web_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.web_container.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.web_container.setWidgetResizable(False)
+            
+            # 在实际大小模式下，让WebView透明于鼠标滚轮事件
+            # 这样滚轮事件会直接传递给ScrollArea
+            self.web_view.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        
+        # 重新渲染当前页面
+        self.display_current_page()
     
     def on_size_changed(self, index):
         """处理尺寸改变"""
@@ -436,115 +424,12 @@ class PreviewWidget(QWidget):
             self.html_generator = HTMLGenerator(page_size=new_size)
             self.paginator.set_page_size(new_size)
             
-            # 更新WebView尺寸并居中
-            self.update_web_view_size()
-            self.center_web_view()
-            
             # 重新处理内容
             if self.markdown_text:
                 self.update_content(self.markdown_text)
             
             # 发送尺寸改变信号
             self.sizeChanged.emit(new_size)
-    
-    def update_web_view_size(self):
-        """更新WebView尺寸"""
-        size_config = {
-            "small": (720, 960),
-            "medium": (1080, 1440),
-            "large": (1440, 1920)
-        }
-        width, height = size_config.get(self.current_size, (1080, 1440))
-        self.web_view.setFixedSize(width, height)
-        
-        # 更新容器大小以适应缩放后的尺寸
-        self.update_container_size()
-    
-    def update_container_size(self):
-        """更新容器大小以适应缩放后的WebView"""
-        # 获取缩放后的实际大小
-        scaled_width = int(self.web_view.width() * self.current_zoom)
-        scaled_height = int(self.web_view.height() * self.current_zoom)
-        
-        # 获取滚动区域的可视大小
-        viewport_size = self.scroll_area.viewport().size()
-        
-        # 设置容器大小，确保至少和视口一样大（用于居中）
-        container_width = max(scaled_width + 40, viewport_size.width())
-        container_height = max(scaled_height + 40, viewport_size.height())
-        
-        self.web_container.setFixedSize(container_width, container_height)
-        
-        # 居中WebView
-        self.center_web_view()
-    
-    def center_web_view(self):
-        """将WebView在容器中居中"""
-        # 计算居中位置
-        container_width = self.web_container.width()
-        container_height = self.web_container.height()
-        
-        scaled_width = int(self.web_view.width() * self.current_zoom)
-        scaled_height = int(self.web_view.height() * self.current_zoom)
-        
-        x = (container_width - scaled_width) // 2
-        y = (container_height - scaled_height) // 2
-        
-        # 确保不会是负数
-        x = max(0, x)
-        y = max(0, y)
-        
-        self.web_view.move(x, y)
-    
-    def on_zoom_changed(self, value):
-        """处理缩放滑块变化"""
-        zoom = value / 100.0
-        self.set_zoom(zoom)
-    
-    def set_zoom(self, zoom_factor):
-        """设置缩放比例"""
-        try:
-            self.current_zoom = zoom_factor
-            self.web_view.setZoomFactor(zoom_factor)
-            
-            # 安全更新zoom_label
-            if hasattr(self, 'zoom_label') and self.zoom_label:
-                self.zoom_label.setText(f"{int(zoom_factor * 100)}%")
-            
-            # 安全更新滑块值
-            if hasattr(self, 'zoom_slider') and self.zoom_slider:
-                self.zoom_slider.blockSignals(True)
-                self.zoom_slider.setValue(int(zoom_factor * 100))
-                self.zoom_slider.blockSignals(False)
-            
-            # 更新容器大小和位置
-            self.update_container_size()
-        except RuntimeError:
-            # 如果组件已被删除，忽略错误
-            pass
-    
-    def zoom_to_100(self):
-        """恢复100%大小"""
-        try:
-            # 确保组件存在后再设置缩放
-            if hasattr(self, 'web_view') and self.web_view:
-                self.set_zoom(1.0)
-        except RuntimeError:
-            # 组件可能还未完全初始化，忽略错误
-            pass
-    
-    def resizeEvent(self, event):
-        """窗口大小改变时更新居中"""
-        super().resizeEvent(event)
-        # 延迟执行，确保布局已更新
-        QTimer.singleShot(10, self.update_container_size)
-    
-    def setup_exporter(self):
-        """设置导出器"""
-        self.exporter = ImageExporter(self.web_view)
-        self.exporter.progress.connect(self.on_export_progress)
-        self.exporter.finished.connect(self.on_export_finished)
-        self.exporter.page_exported.connect(self.on_page_exported)
     
     def update_content(self, markdown_text: str):
         """更新预览内容"""
@@ -566,89 +451,446 @@ class PreviewWidget(QWidget):
             # 显示第一页
             self.display_current_page()
             
-            # 更新按钮
+            # 更新按钮和信息
             self.update_buttons()
-            
-            # 更新页面信息
             self.update_page_info()
             
-            # 保持当前缩放比例
-            QTimer.singleShot(100, lambda: self.set_zoom(self.current_zoom))
-            
         except Exception as e:
-            self.show_error(f"预览错误: {str(e)}")
-    
-    def update_page_info(self):
-        """更新页面信息显示"""
-        if hasattr(self, 'page_info_label') and self.page_info_label:
-            if self.total_pages > 1:
-                self.page_info_label.setText(f"第 {self.current_page}/{self.total_pages} 页")
-            else:
-                self.page_info_label.setText("")
+            self.show_error(f"Preview error: {str(e)}")
     
     def display_current_page(self):
         """显示当前页"""
+        # 如果正在导出，不更新显示
+        if self._is_exporting:
+            return
+            
         if not self.current_pages:
             return
             
         if 1 <= self.current_page <= len(self.current_pages):
             page_content = self.current_pages[self.current_page - 1]
             
-            # 生成完整HTML
-            full_html = self.html_generator.generate(page_content)
+            # 获取目标尺寸
+            size_config = {
+                "small": (720, 960),
+                "medium": (1080, 1440),
+                "large": (1440, 1920)
+            }
+            target_width, target_height = size_config.get(self.current_size, (1080, 1440))
+            
+            # 根据预览模式生成不同的HTML
+            if self.preview_mode == "fit":
+                # 适应窗口模式
+                full_html = self.generate_fit_html(page_content, target_width, target_height)
+                self.web_view.setMinimumSize(0, 0)
+                self.web_view.setMaximumSize(16777215, 16777215)
+                self.web_container.setWidgetResizable(True)
+                
+            else:
+                # 实际大小模式：添加禁用内部滚动的CSS
+                full_html = self.generate_actual_html(page_content, target_width, target_height)
+                # 设置WebView为实际尺寸
+                self.web_view.setFixedSize(target_width, target_height)
+                self.web_container.setWidgetResizable(False)
             
             # 加载到WebView
             self.web_view.setHtml(full_html, QUrl("file:///"))
     
+    def generate_actual_html(self, content: str, target_width: int, target_height: int) -> str:
+        """生成实际大小模式的HTML（禁用内部滚动）"""
+        base_html = self.html_generator.generate(content)
+        
+        # 添加禁用滚动的CSS和JavaScript
+        disable_scroll = """
+        <style>
+            /* 禁用所有内部滚动 */
+            html, body {
+                overflow: hidden !important;
+                position: fixed !important;
+                width: 100% !important;
+                height: 100% !important;
+                touch-action: none !important;
+                user-select: none !important;
+                -webkit-user-select: none !important;
+                -ms-overflow-style: none !important;
+                scrollbar-width: none !important;
+            }
+            
+            html::-webkit-scrollbar,
+            body::-webkit-scrollbar {
+                display: none !important;
+            }
+            
+            * {
+                -ms-overflow-style: none !important;
+                scrollbar-width: none !important;
+            }
+            
+            *::-webkit-scrollbar {
+                display: none !important;
+            }
+        </style>
+        
+        <script>
+            // 禁用滚动事件
+            document.addEventListener('DOMContentLoaded', function() {
+                // 禁用滚轮事件
+                document.addEventListener('wheel', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return false;
+                }, { passive: false, capture: true });
+                
+                // 禁用触摸滚动
+                document.addEventListener('touchmove', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return false;
+                }, { passive: false, capture: true });
+                
+                // 禁用键盘滚动
+                document.addEventListener('keydown', function(e) {
+                    const scrollKeys = [32, 33, 34, 35, 36, 37, 38, 39, 40];
+                    if (scrollKeys.includes(e.keyCode)) {
+                        e.preventDefault();
+                        return false;
+                    }
+                }, false);
+                
+                // 固定body位置
+                document.body.style.position = 'fixed';
+                document.body.style.top = '0';
+                document.body.style.left = '0';
+                document.body.style.width = '100%';
+                document.body.style.height = '100%';
+                document.body.style.overflow = 'hidden';
+            });
+        </script>
+        """
+        
+        # 插入到head标签结束前
+        full_html = base_html.replace('</head>', disable_scroll + '</head>')
+        
+        return full_html
+    
+    def generate_fit_html(self, content: str, target_width: int, target_height: int) -> str:
+        """生成适应窗口的HTML"""
+        base_html = self.html_generator.generate(content)
+        
+        scale_script = f"""
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            html, body {{
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+                background: #1a1a2e;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }}
+            
+            #viewport-container {{
+                position: relative;
+                width: 100vw;
+                height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                overflow: hidden;
+            }}
+            
+            #content-wrapper {{
+                position: relative;
+                width: {target_width}px;
+                height: {target_height}px;
+                transform-origin: center center;
+                flex-shrink: 0;
+            }}
+        </style>
+        
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {{
+                if (!document.getElementById('viewport-container')) {{
+                    const viewportContainer = document.createElement('div');
+                    viewportContainer.id = 'viewport-container';
+                    
+                    const contentWrapper = document.createElement('div');
+                    contentWrapper.id = 'content-wrapper';
+                    
+                    while (document.body.firstChild) {{
+                        contentWrapper.appendChild(document.body.firstChild);
+                    }}
+                    
+                    viewportContainer.appendChild(contentWrapper);
+                    document.body.appendChild(viewportContainer);
+                }}
+                
+                function adjustScale() {{
+                    const wrapper = document.getElementById('content-wrapper');
+                    const container = document.getElementById('viewport-container');
+                    
+                    if (!wrapper || !container) return;
+                    
+                    const availableWidth = container.clientWidth;
+                    const availableHeight = container.clientHeight;
+                    
+                    const targetWidth = {target_width};
+                    const targetHeight = {target_height};
+                    
+                    const padding = 40;
+                    const scaleX = (availableWidth - padding) / targetWidth;
+                    const scaleY = (availableHeight - padding) / targetHeight;
+                    
+                    const scale = Math.min(scaleX, scaleY, 1.0);
+                    
+                    wrapper.style.transform = `scale(${{scale}})`;
+                }}
+                
+                setTimeout(adjustScale, 100);
+                window.addEventListener('resize', adjustScale);
+                
+                const observer = new ResizeObserver(adjustScale);
+                observer.observe(document.getElementById('viewport-container'));
+            }});
+        </script>
+        """
+        
+        full_html = base_html.replace('</head>', scale_script + '</head>')
+        return full_html
+    
     def prev_page(self):
         """上一页"""
         if self.current_page > 1:
-            self.current_page -= 1
-            self.display_current_page()
-            self.update_buttons()
-            self.update_page_info()
+            self.go_to_page(self.current_page - 1)
     
     def next_page(self):
         """下一页"""
         if self.current_page < self.total_pages:
-            self.current_page += 1
+            self.go_to_page(self.current_page + 1)
+    
+    def go_to_page(self, page_num: int):
+        """跳转到指定页"""
+        if 1 <= page_num <= self.total_pages:
+            self.current_page = page_num
             self.display_current_page()
             self.update_buttons()
             self.update_page_info()
     
     def update_buttons(self):
         """更新按钮状态"""
-        if hasattr(self, 'prev_btn') and self.prev_btn:
-            self.prev_btn.setEnabled(self.current_page > 1)
-        if hasattr(self, 'next_btn') and self.next_btn:
-            self.next_btn.setEnabled(self.current_page < self.total_pages)
-        
-        # 发送页面改变信号
+        self.prev_btn.setEnabled(self.current_page > 1)
+        self.next_btn.setEnabled(self.current_page < self.total_pages)
         self.pageChanged.emit(self.current_page, self.total_pages)
+    
+    def update_page_info(self):
+        """更新页面信息显示"""
+        if self.total_pages > 1:
+            self.page_info_label.setText(f"Page {self.current_page} / {self.total_pages}")
+        else:
+            self.page_info_label.setText("Page 1")
+    
+    def get_button_style_qt(self) -> str:
+        """获取按钮样式 - Qt兼容版本"""
+        return """
+            QPushButton {
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.25);
+                color: rgba(255, 255, 255, 0.95);
+                padding: 10px 20px;
+                border-radius: 18px;
+                font-weight: 600;
+                font-size: 13px;
+                letter-spacing: 0.5px;
+            }
+            
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.15);
+                border: 1px solid rgba(0, 255, 136, 0.5);
+                color: #00ff88;
+            }
+            
+            QPushButton:pressed {
+                background: rgba(0, 255, 136, 0.2);
+            }
+            
+            QPushButton:disabled {
+                background: rgba(255, 255, 255, 0.02);
+                border-color: rgba(255, 255, 255, 0.1);
+                color: rgba(255, 255, 255, 0.3);
+            }
+        """
+    
+    def get_combobox_style_qt(self) -> str:
+        """获取下拉框样式 - Qt兼容版本"""
+        return """
+            QComboBox {
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                color: rgba(255, 255, 255, 0.95);
+                padding: 8px 15px;
+                border-radius: 10px;
+                font-size: 12px;
+                font-weight: 500;
+                letter-spacing: 0.3px;
+            }
+            
+            QComboBox:hover {
+                background: rgba(255, 255, 255, 0.12);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+            
+            QComboBox::drop-down {
+                border: none;
+                width: 25px;
+            }
+            
+            QComboBox::down-arrow {
+                image: none;
+                border-style: solid;
+                border-width: 5px 5px 0 5px;
+                border-color: rgba(255, 255, 255, 0.7) transparent transparent transparent;
+                margin-right: 5px;
+            }
+            
+            QComboBox QAbstractItemView {
+                background: rgba(30, 30, 50, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                color: white;
+                selection-background-color: rgba(0, 255, 136, 0.3);
+                outline: none;
+                padding: 5px;
+                border-radius: 8px;
+            }
+            
+            QComboBox QAbstractItemView::item {
+                min-height: 32px;
+                padding: 8px 12px;
+                border-radius: 4px;
+                margin: 2px 4px;
+            }
+            
+            QComboBox QAbstractItemView::item:hover {
+                background: rgba(255, 255, 255, 0.1);
+            }
+            
+            QComboBox QAbstractItemView::item:selected {
+                background: rgba(0, 255, 136, 0.3);
+                color: white;
+            }
+        """
+    
+    def get_radio_style_qt(self) -> str:
+        """获取单选按钮样式 - Qt兼容版本"""
+        return """
+            QRadioButton {
+                color: rgba(255, 255, 255, 0.85);
+                font-size: 12px;
+                spacing: 8px;
+                padding: 5px;
+            }
+            
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid rgba(255, 255, 255, 0.3);
+                border-radius: 8px;
+                background: rgba(255, 255, 255, 0.05);
+            }
+            
+            QRadioButton::indicator:hover {
+                border-color: rgba(0, 255, 136, 0.5);
+                background: rgba(0, 255, 136, 0.1);
+            }
+            
+            QRadioButton::indicator:checked {
+                background: qradialgradient(
+                    cx: 0.5, cy: 0.5, radius: 0.5,
+                    fx: 0.5, fy: 0.5,
+                    stop: 0 #00ff88,
+                    stop: 0.6 #00ff88,
+                    stop: 0.7 transparent
+                );
+                border-color: #00ff88;
+            }
+            
+            QRadioButton:checked {
+                color: #00ff88;
+            }
+        """
+    
+    def setup_exporter(self):
+        """设置导出器"""
+        self.exporter = ImageExporter(self.web_view)
+        self.exporter.progress.connect(self.on_export_progress)
+        self.exporter.finished.connect(self.on_export_finished)
+        self.exporter.page_exported.connect(self.on_page_exported)
     
     def export_pages(self, folder: str):
         """导出所有页面为图片"""
         if not self.current_pages:
-            QMessageBox.warning(self, "提示", "没有可导出的内容")
+            QMessageBox.warning(self, "Warning", "No content to export")
             return
+        
+        # 保存当前状态
+        self._is_exporting = True
+        self._saved_preview_mode = self.preview_mode
+        self._saved_current_page = self.current_page
         
         # 创建进度对话框
         self.progress_dialog = QProgressDialog(
-            "正在导出图片...", 
-            "取消", 
+            "Exporting images...", 
+            "Cancel", 
             0, 
             self.total_pages, 
             self
         )
         self.progress_dialog.setWindowModality(Qt.WindowModal)
         self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.setAutoReset(False)
+        
+        # 设置进度对话框样式
+        self.progress_dialog.setStyleSheet("""
+            QProgressDialog {
+                background: rgba(30, 30, 50, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 10px;
+                color: white;
+            }
+            QProgressBar {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 5px;
+                text-align: center;
+                color: white;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 rgba(0, 255, 136, 0.6),
+                    stop: 1 rgba(0, 255, 255, 0.6));
+                border-radius: 4px;
+            }
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                color: white;
+                padding: 5px 15px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.15);
+            }
+        """)
+        
         self.progress_dialog.canceled.connect(self.on_export_canceled)
         
-        # 导出前恢复100%大小（确保导出的是原始尺寸）
-        original_zoom = self.current_zoom
-        self.web_view.setZoomFactor(1.0)
-        
-        # 开始导出
+        # 开始导出（始终以实际大小导出）
         self.exporter.export_pages(
             self.current_pages,
             folder,
@@ -656,21 +898,22 @@ class PreviewWidget(QWidget):
             format="PNG",
             quality=100
         )
-        
-        # 保存原始缩放比例，导出完成后恢复
-        self._original_zoom_for_export = original_zoom
     
     def on_export_progress(self, current: int, total: int):
         """处理导出进度"""
         if hasattr(self, 'progress_dialog') and self.progress_dialog:
             self.progress_dialog.setValue(current)
-            self.progress_dialog.setLabelText(f"正在导出第 {current}/{total} 页...")
+            self.progress_dialog.setLabelText(f"Exporting page {current}/{total}...")
     
     def on_export_finished(self, success: bool, message: str):
         """处理导出完成"""
+        # 重置导出状态
+        self._is_exporting = False
+        
         # 关闭进度对话框
-        if hasattr(self, 'progress_dialog') and self.progress_dialog is not None:
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
             try:
+                self.progress_dialog.canceled.disconnect()
                 self.progress_dialog.close()
                 self.progress_dialog.deleteLater()
             except:
@@ -678,33 +921,82 @@ class PreviewWidget(QWidget):
             finally:
                 self.progress_dialog = None
         
-        # 恢复原始缩放比例
-        if hasattr(self, '_original_zoom_for_export'):
-            self.set_zoom(self._original_zoom_for_export)
-            delattr(self, '_original_zoom_for_export')
+        # 恢复之前的预览模式
+        if hasattr(self, '_saved_preview_mode'):
+            if self._saved_preview_mode == "fit":
+                self.fit_mode_btn.setChecked(True)
+                self.preview_mode = "fit"
+                # 恢复适应窗口模式设置
+                self.web_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                self.web_container.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                self.web_container.setWidgetResizable(True)
+                self.web_view.setMinimumSize(0, 0)
+                self.web_view.setMaximumSize(16777215, 16777215)
+                self.web_view.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            else:
+                self.actual_mode_btn.setChecked(True)
+                self.preview_mode = "actual"
+                # 恢复实际大小模式设置
+                self.web_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                self.web_container.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                self.web_container.setWidgetResizable(False)
+                self.web_view.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         
+        # 恢复到之前的页面
+        if hasattr(self, '_saved_current_page'):
+            self.go_to_page(self._saved_current_page)
+        
+        # 显示结果消息
         if success:
-            # 添加尺寸信息到消息中
-            size_info = f"({self.current_size}: {self.web_view.width()}×{self.web_view.height()}px)"
-            QMessageBox.information(self, "导出成功", f"{message}\n尺寸: {size_info}")
+            size_info = f"({self.current_size}: {self.get_actual_size()}px)"
+            QMessageBox.information(self, "Export Successful", f"{message}\nSize: {size_info}")
         else:
-            QMessageBox.warning(self, "导出失败", message)
+            QMessageBox.warning(self, "Export Failed", message)
     
     def on_page_exported(self, page_num: int, file_path: str):
         """处理单页导出完成"""
-        print(f"已导出第 {page_num} 页: {file_path}")
+        print(f"Exported page {page_num}: {file_path}")
     
     def on_export_canceled(self):
         """处理导出取消"""
         self.exporter.cancel_export()
-        # 恢复原始缩放
-        if hasattr(self, '_original_zoom_for_export'):
-            self.set_zoom(self._original_zoom_for_export)
-            delattr(self, '_original_zoom_for_export')
+        # 重置导出状态
+        self._is_exporting = False
+        
+        # 恢复之前的预览模式
+        if hasattr(self, '_saved_preview_mode'):
+            if self._saved_preview_mode == "fit":
+                self.fit_mode_btn.setChecked(True)
+                self.preview_mode = "fit"
+                self.web_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                self.web_container.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                self.web_container.setWidgetResizable(True)
+                self.web_view.setMinimumSize(0, 0)
+                self.web_view.setMaximumSize(16777215, 16777215)
+                self.web_view.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            else:
+                self.actual_mode_btn.setChecked(True)
+                self.preview_mode = "actual"
+                self.web_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                self.web_container.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+                self.web_container.setWidgetResizable(False)
+                self.web_view.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        
+        # 恢复到之前的页面
+        if hasattr(self, '_saved_current_page'):
+            self.go_to_page(self._saved_current_page)
+    
+    def get_actual_size(self) -> str:
+        """获取实际尺寸"""
+        size_config = {
+            "small": "720×960",
+            "medium": "1080×1440",
+            "large": "1440×1920"
+        }
+        return size_config.get(self.current_size, "1080×1440")
     
     def handle_scroll(self, percentage: float):
-        """处理编辑器滚动同步"""
-        # 固定尺寸，不需要滚动同步
+        """处理编辑器滚动同步（保留接口兼容性）"""
         pass
     
     def show_error(self, message: str):
@@ -712,7 +1004,7 @@ class PreviewWidget(QWidget):
         error_html = f"""
         <html>
         <body style="padding: 20px; font-family: sans-serif; background: #1a1a2e; color: #e0e6ed;">
-            <h3 style="color: #ff4757;">错误</h3>
+            <h3 style="color: #ff4757;">Error</h3>
             <p style="color: #8a92a6;">{message}</p>
         </body>
         </html>
@@ -723,4 +1015,23 @@ class PreviewWidget(QWidget):
         """切换主题"""
         self.html_generator.set_theme(theme)
         if self.current_pages:
+            self.display_current_page()
+    
+    def resizeEvent(self, event):
+        """处理窗口大小改变事件"""
+        super().resizeEvent(event)
+        # 在适应窗口模式下，重新渲染以适应新尺寸
+        if self.preview_mode == "fit" and self.current_pages:
+            # 延迟执行以避免频繁重绘
+            if hasattr(self, 'resize_timer'):
+                self.resize_timer.stop()
+            else:
+                self.resize_timer = QTimer()
+                self.resize_timer.timeout.connect(self.on_resize_finished)
+                self.resize_timer.setSingleShot(True)
+            self.resize_timer.start(300)
+    
+    def on_resize_finished(self):
+        """窗口大小调整完成后的处理"""
+        if self.preview_mode == "fit":
             self.display_current_page()

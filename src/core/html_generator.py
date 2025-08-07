@@ -237,6 +237,16 @@ class HTMLGenerator:
                 display: none;
             }}
         }}
+
+        /* 完全隐藏分页标记 */
+        .pagebreak-marker {{
+            display: none !important;
+            height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: none !important;
+            visibility: hidden !important;
+        }}
         """
     
     def get_js(self) -> str:
