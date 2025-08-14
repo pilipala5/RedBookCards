@@ -16,29 +16,41 @@ class TaskListExtension(markdown.Extension):
         md.postprocessors.register(TaskListPostprocessor(md), 'tasklist', 25)
 
 class TaskListPreprocessor(markdown.preprocessors.Preprocessor):
-    """预处理器：标记任务列表项"""
-    
-    TASK_PATTERN = re.compile(r'^(\s*)([-\*\+])\s+\[([ xX])\]\s+(.*)$')
+    """预处理任务列表语法"""
     
     def run(self, lines):
         new_lines = []
+        in_list = False
+        
         for line in lines:
-            match = self.TASK_PATTERN.match(line)
-            if match:
-                indent, marker, checked, text = match.groups()
-                # 将任务列表转换为特殊标记，避免被普通列表处理干扰
-                checked_mark = 'checked' if checked.lower() == 'x' else 'unchecked'
-                # 使用特殊的HTML注释包裹，确保Markdown解析器不会破坏它
-                new_line = f"{indent}{marker} <!--tasklist-{checked_mark}--> {text}"
+            stripped = line.strip()
+            
+            # 识别任务列表项
+            if stripped.startswith('- [ ] ') or stripped.startswith('- [x] ') or \
+               stripped.startswith('* [ ] ') or stripped.startswith('* [x] '):
+                # 将任务列表标记转换为 HTML 注释，避免被 Markdown 再次处理
+                if stripped.startswith('- [x] ') or stripped.startswith('* [x] '):
+                    new_line = line.replace('[x] ', '<!--tasklist-checked--> ', 1)
+                else:
+                    new_line = line.replace('[ ] ', '<!--tasklist-unchecked--> ', 1)
+                
                 new_lines.append(new_line)
+                in_list = True
             else:
+                # 如果从任务列表切换到普通文本，插入一个空行保证 Markdown 正常渲染
+                if in_list and stripped and not stripped.startswith(('-', '*')):
+                    new_lines.append('')
+                    in_list = False
+                
                 new_lines.append(line)
+        
         return new_lines
 
 class TaskListPostprocessor(markdown.postprocessors.Postprocessor):
-    """后处理器：将标记转换为HTML复选框"""
+    """后处理：将占位注释替换为真正的复选框"""
     
     def run(self, text):
+        # 将任务列表标记转换为带有 checkbox 的 li
         # 替换已选中的任务
         text = re.sub(
             r'<li><!--tasklist-checked-->\s*(.*?)</li>',
@@ -55,34 +67,40 @@ class TaskListPostprocessor(markdown.postprocessors.Postprocessor):
             flags=re.DOTALL
         )
         
-        # 为包含任务列表的ul/ol添加class
-        text = re.sub(
-            r'<(ul|ol)>(\s*<li class="task-list-item">)',
-            r'<\1 class="task-list">\2',
-            text
-        )
-        
         return text
 
 class MarkdownProcessor:
     def __init__(self):
-        # 使用必要且稳定的扩展
+        # 初始化 Markdown 扩展
         self.extensions = [
             TaskListExtension(),                # 放到最前面，优先处理任务列表
-            'markdown.extensions.fenced_code',
-            'markdown.extensions.tables',
-            'markdown.extensions.nl2br',
-            'markdown.extensions.attr_list',
-            'markdown.extensions.def_list',
-            'markdown.extensions.footnotes',
-            'markdown.extensions.toc',
-            'markdown.extensions.sane_lists',   # 放到任务列表扩展之后
-            'markdown.extensions.smarty',
+            'meta',
+            'toc',
+            'abbr',
+            'attr_list',
+            'def_list',
+            'admonition',
+            'codehilite',
+            'fenced_code',
+            'footnotes',
+            'md_in_html',
+            'sane_lists',
+            'smarty',
+            'tables',
+            'wikilinks'
         ]
         
-        # 配置扩展
-        self.extension_configs = {}
-        
+        self.extension_configs = {
+            'codehilite': {
+                'css_class': 'highlight',
+                'guess_lang': False,
+                'pygments_style': 'default'
+            },
+            'toc': {
+                'permalink': True
+            }
+        }
+    
     def parse(self, text: str) -> str:
         """解析 Markdown 文本为 HTML"""
         try:
@@ -109,44 +127,38 @@ class MarkdownProcessor:
             return f"<p style='color: red;'>解析错误: {str(e)}</p>"
     
     def _fix_local_image_paths(self, html: str) -> str:
-        """修复本地图片路径，确保能在 QWebEngineView 中显示"""
+        """修复本地图片路径，确保能在 QWebEngineView 中显示（兼容任意盘符）"""
         from bs4 import BeautifulSoup
-        
+        import re
         soup = BeautifulSoup(html, 'html.parser')
-        
         for img in soup.find_all('img'):
             src = img.get('src', '')
-            if src:
-                # 处理本地文件路径
-                if not src.startswith(('http://', 'https://', 'data:', 'file:')):
-                    # 处理 Windows 路径
-                    if src.startswith('C:') or src.startswith('D:') or ':\\' in src or ':/' in src:
-                        # 这是绝对路径
-                        # 统一转换为正斜杠
-                        src = src.replace('\\', '/')
-                        # 如果路径以 C:/ 开头，转换为 file:///C:/
-                        if not src.startswith('file:'):
-                            if src[1:3] == ':/':  # 类似 C:/ 的格式
-                                src = 'file:///' + src
-                            else:
-                                src = 'file:///' + src.replace(':', '')
-                    else:
-                        # 相对路径，转换为绝对路径
-                        try:
-                            abs_path = os.path.abspath(src).replace('\\', '/')
-                            src = 'file:///' + abs_path
-                        except:
-                            pass
-                    
-                    img['src'] = src
-                    
-                # 添加一些默认属性以改善显示
+            if not src:
+                continue
+            # 已是可用的 URL / data URI 直接跳过
+            if src.startswith(('http://', 'https://', 'data:', 'file:')):
+                img['data-protected'] = 'true'
                 if not img.get('style'):
                     img['style'] = 'max-width: 100%; height: auto;'
-                
-                # 保护标记
-                img['data-protected'] = 'true'
-        
+                continue
+            # Windows 绝对路径：任意盘符，如 E:\ 或 E:/ 开头
+            if re.match(r'^[A-Za-z]:[\\/]', src):
+                src = src.replace('\\', '/')
+                if not src.startswith('file:'):
+                    src = 'file:///' + src
+            else:
+                # 相对路径 -> 绝对路径
+                try:
+                    abs_path = os.path.abspath(src).replace('\\', '/')
+                    src = 'file:///' + abs_path
+                except Exception:
+                    pass
+            # 应用修正
+            img['src'] = src
+            # 默认样式
+            if not img.get('style'):
+                img['style'] = 'max-width: 100%; height: auto;'
+            img['data-protected'] = 'true'
         return str(soup)
     
     def _process_pagebreaks_before_markdown(self, text: str) -> str:
@@ -166,9 +178,8 @@ class MarkdownProcessor:
         return text
     
     def _add_tasklist_styles(self, html: str) -> str:
-        """添加任务列表的内联样式"""
-        # 如果HTML中包含任务列表，添加样式
-        if 'task-list' in html:
+        """为任务列表添加样式"""
+        if '<input type="checkbox" class="task-list-checkbox"' in html:
             style = """
             <style>
                 .task-list {
@@ -185,21 +196,22 @@ class MarkdownProcessor:
                 
                 .task-list-checkbox {
                     margin-right: 8px;
-                    margin-left: 0;
+                    width: 16px;
+                    height: 16px;
                     vertical-align: middle;
                     position: relative;
                     top: -1px;
-                    cursor: default;
-                    width: 16px;
-                    height: 16px;
-                    accent-color: var(--primary-color, #FF2442);
+                    border: 1px solid var(--border-color, #ddd);
+                    border-radius: 3px;
+                    background: var(--bg-color, #fff);
+                    appearance: none;
                 }
                 
-                .task-list-item + .task-list-item {
-                    margin-top: 8px;
+                .task-list-checkbox:checked {
+                    background: var(--checkbox-bg, #ffeef0);
+                    border-color: var(--primary-color, #FF2442);
                 }
                 
-                /* 美化复选框样式 */
                 .task-list-checkbox:checked::before {
                     content: '✓';
                     position: absolute;
