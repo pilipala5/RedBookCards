@@ -46,7 +46,7 @@ class MarkdownRegressionTests(unittest.TestCase):
         self.assertEqual(len(soup.find_all("li", recursive=True)), 2)
 
     def test_inline_and_block_formula_render_to_mathml(self):
-        source = r"""Inline: $E=mc^2$.
+        source = r"""An inline formula $E=mc^2$ appears here.
 
 $$
 \frac{a}{b} = c
@@ -55,7 +55,7 @@ $$
         html = self.processor.parse(source)
         soup = BeautifulSoup(html, "html.parser")
         maths = soup.find_all("math")
-        self.assertGreaterEqual(len(maths), 2, html)
+        self.assertGreaterEqual(len(maths), 2)
         self.assertTrue(any(m.get("display") == "block" for m in maths))
         self.assertTrue(any(m.get("display") == "inline" for m in maths))
 
