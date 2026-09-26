@@ -1,0 +1,89 @@
+name: Build desktop apps
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: RedBookCards-Windows-x64
+            kind: windows
+          - os: macos-15
+            artifact: RedBookCards-macOS-AppleSilicon
+            kind: mac-arm
+          - os: macos-15-intel
+            artifact: RedBookCards-macOS-Intel
+            kind: mac-intel
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+
+      - name: Build app
+        run: python build.py
+
+      - name: Package Windows
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/RedBookCards.exe -DestinationPath RedBookCards-Windows-x64.zip
+
+      - name: Package macOS
+        if: startsWith(matrix.kind, 'mac-')
+        run: ditto -c -k --sequesterRsrc --keepParent dist/RedBookCards.app "${{ matrix.artifact }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            RedBookCards-Windows-x64.zip
+            RedBookCards-macOS-AppleSilicon.zip
+            RedBookCards-macOS-Intel.zip
+          if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect archives
+        run: find artifacts -name '*.zip' -exec cp {} . \;
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
