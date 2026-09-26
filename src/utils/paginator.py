@@ -22,47 +22,50 @@ class SmartPaginator:
 
     # 元素高度估算（像素）
     ELEMENT_HEIGHTS = {
-        'h1': 85,        # 大标题 + 底部边框
-        'h2': 68,        # 二级标题
-        'h3': 58,        # 三级标题
-        'h4': 48,        # 四级标题
-        'h5': 43,        # 五级标题
-        'h6': 38,        # 六级标题
-        'p_base': 20,    # 段落基础高度
-        'p_line': 26,    # 段落每行高度（考虑行高1.8）
-        'li': 32,        # 列表项
-        'code_block': 35,  # 代码块基础高度
-        'code_line': 22,   # 代码每行高度
-        'blockquote': 55,  # 引用块基础高度
-        'blockquote_line': 26,  # 引用每行高度
-        'table_header': 42,  # 表格头
-        'table_row': 38,     # 表格行
-        'hr': 30,           # 分隔线
-        'margin_bottom': 18,  # 元素底部间距
+        # 这些数值与 style_manager.py 的默认 18px / 1.85 行高保持同一量级。
+        # 宁可略微高估，也不要让内容在 WebEngine 中被 card 的 overflow:hidden 裁掉。
+        'h1': 112,
+        'h2': 112,
+        'h3': 92,
+        'h4': 62,
+        'h5': 54,
+        'h6': 48,
+        'p_base': 0,
+        'p_line': 34,
+        'li': 50,
+        'code_block': 86,   # padding + 上下 margin 的基础开销（另加 code_line）
+        'code_line': 26,
+        'blockquote': 74,   # padding + 上下 margin 的基础开销（另加内容行）
+        'blockquote_line': 32,
+        'table_header': 62,
+        'table_row': 62,
+        'hr': 78,
+        'margin_bottom': 22,
     }
 
     # 页面尺寸配置
     PAGE_SIZES = {
+        # 必须与 HTMLGenerator.get_page_css() 的真实画布和 .content padding 一致。
         "small": {
             "width": 720,
             "height": 960,
-            "padding_top": 35,
-            "padding_bottom": 50,
-            "padding_sides": 30
-        },
-        "medium": {
-            "width": 1024,
-            "height": 1365,
             "padding_top": 50,
             "padding_bottom": 70,
-            "padding_sides": 40
+            "padding_sides": 45
+        },
+        "medium": {
+            "width": 1080,
+            "height": 1440,
+            "padding_top": 50,
+            "padding_bottom": 70,
+            "padding_sides": 45
         },
         "large": {
             "width": 1440,
             "height": 1920,
-            "padding_top": 55,
-            "padding_bottom": 90,
-            "padding_sides": 50
+            "padding_top": 50,
+            "padding_bottom": 70,
+            "padding_sides": 45
         }
     }
 
@@ -70,6 +73,7 @@ class SmartPaginator:
     MIN_ORPHAN_LINES = 2  # 孤行控制
     MIN_WIDOW_LINES = 2  # 寡行控制
     HEADING_KEEP_WITH = 120  # 标题后至少保留的内容高度
+    CONTENT_SAFETY = 20      # 给字体度量/平台差异预留的页尾安全区
 
     # 字符宽度估算（像素）
     CHAR_WIDTH = 15  # 中文字符平均宽度（稍微调小）
@@ -92,7 +96,9 @@ class SmartPaginator:
         self.padding_top = cfg["padding_top"]
         self.padding_bottom = cfg["padding_bottom"]
         self.padding_sides = cfg["padding_sides"]
-        self.content_height = self.page_height - self.padding_top - self.padding_bottom
+        self.content_height = (
+            self.page_height - self.padding_top - self.padding_bottom - self.CONTENT_SAFETY
+        )
         self.content_width = self.page_width - self.padding_sides * 2
 
     def get_page_info(self) -> Dict[str, int]:
@@ -427,6 +433,7 @@ class SmartPaginator:
                 # 普通段落
                 text = node.get_text(strip=True)
                 imgs = node.find_all('img')
+                maths = node.find_all('math')
                 if text:
                     if imgs:
                         # 包含图片的段落（图文）
@@ -441,8 +448,8 @@ class SmartPaginator:
                             can_break=False
                         ))
                     else:
-                        # 纯文本段落
-                        height = self._calculate_paragraph_height(text)
+                        # 纯文本段落（内联公式可能高于普通文字，额外留出垂直空间）
+                        height = self._calculate_paragraph_height(text) + len(maths) * 18
                         elements.append(PageElement(
                             type='paragraph',
                             content=str(node),
@@ -488,9 +495,25 @@ class SmartPaginator:
                 # 列表
                 items = node.find_all('li', recursive=False)
                 imgs = node.find_all('img')
-                list_height = len(items) * self.ELEMENT_HEIGHTS['li']
+                
+                # CSS 中 ul/ol 有 24px 上下 margin，li 有 16px 下 margin；
+                # 同时列表项会自动换行，不能只按“每项固定 32px”估算。
+                list_height = 48
+                effective_width = max(1, self.content_width - 38)
+                for item in items:
+                    item_text = item.get_text(" ", strip=True)
+                    if not item_text:
+                        list_height += self.ELEMENT_HEIGHTS['li']
+                        continue
+                    
+                    total_width = 0
+                    for ch in item_text:
+                        total_width += self.CHAR_WIDTH if ord(ch) > 127 else self.CHAR_WIDTH_EN
+                    lines = max(1, int(total_width / effective_width) + 1)
+                    list_height += lines * self.ELEMENT_HEIGHTS['p_line'] + 16
+                
                 img_height = len(imgs) * 300
-                total_height = list_height + img_height + self.ELEMENT_HEIGHTS['margin_bottom']
+                total_height = list_height + img_height
                 elements.append(PageElement(
                     type='list',
                     content=str(node),
@@ -558,9 +581,14 @@ class SmartPaginator:
                     headers = node.find_all('th')
                     text = node.get_text(strip=True)
 
-                    height = (len(headers) * self.ELEMENT_HEIGHTS['table_header'] +
-                              (len(rows) - len(headers)) * self.ELEMENT_HEIGHTS['table_row'] +
-                              self.ELEMENT_HEIGHTS['margin_bottom'])
+                    # headers 是单元格数量，不是表头行数量；旧算法会随列数错误放大/缩小。
+                    has_header = bool(headers)
+                    body_rows = max(0, len(rows) - (1 if has_header else 0))
+                    height = (
+                        (self.ELEMENT_HEIGHTS['table_header'] if has_header else 0) +
+                        body_rows * self.ELEMENT_HEIGHTS['table_row'] +
+                        56  # table 的 28px 上下 margin
+                    )
 
                     elements.append(PageElement(
                         type='table',
@@ -578,6 +606,19 @@ class SmartPaginator:
                         can_break=True
                     ))
 
+            elif tag_name == 'math':
+                # 块级公式使用原生 MathML 渲染，整体不可拆分。
+                display = node.get('display', 'inline')
+                text = node.get_text(" ", strip=True)
+                height = 96 if display == 'block' else 42
+                elements.append(PageElement(
+                    type='math',
+                    content=str(node),
+                    text=text,
+                    height=height,
+                    can_break=False
+                ))
+            
             elif tag_name == 'hr':
                 # 分隔线
                 elements.append(PageElement(
