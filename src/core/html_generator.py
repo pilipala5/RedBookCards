@@ -196,6 +196,29 @@ class HTMLGenerator:
             pointer-events: none;
         }}
         
+        /* 数学公式（由 latex2mathml 转换为原生 MathML） */
+        .mathml-formula {{
+            color: var(--text-color);
+            font-size: 1.08em;
+        }}
+        
+        math[display="block"] {{
+            display: block;
+            max-width: 100%;
+            margin: 28px auto;
+            text-align: center;
+        }}
+        
+        math[display="inline"] {{
+            display: inline-block;
+            vertical-align: -0.12em;
+        }}
+        
+        .math-error {{
+            color: #c0392b;
+            font-family: var(--code-font);
+        }}
+        
         /* 响应式图片 */
         img {{
             max-width: 100%;
