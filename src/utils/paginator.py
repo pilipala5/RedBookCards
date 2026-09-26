@@ -455,7 +455,7 @@ class SmartPaginator:
                             content=str(node),
                             text=text,
                             height=height,
-                            can_break=True
+                            can_break=not bool(maths)
                         ))
                 else:
                     # 没有文本内容
