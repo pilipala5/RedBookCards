@@ -1,0 +1,117 @@
+name: Build desktop apps
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: RedBookCards-Windows-x64
+            kind: windows
+          - os: macos-15
+            artifact: RedBookCards-macOS-AppleSilicon
+            kind: mac-arm
+          - os: macos-15-intel
+            artifact: RedBookCards-macOS-Intel
+            kind: mac-intel
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+
+      - name: Build app
+        run: python build.py
+
+      - name: Package Windows
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/RedBookCards.exe -DestinationPath RedBookCards-Windows-x64.zip
+
+      - name: Package macOS
+        if: startsWith(matrix.kind, 'mac-')
+        run: ditto -c -k --sequesterRsrc --keepParent dist/RedBookCards.app "${{ matrix.artifact }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            RedBookCards-Windows-x64.zip
+            RedBookCards-macOS-AppleSilicon.zip
+            RedBookCards-macOS-Intel.zip
+          if-no-files-found: ignore
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'release: v1.1.0'))
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect archives
+        run: find artifacts -name '*.zip' -exec cp {} . \;
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v1.1.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: RedBookCards v1.1.0
+          generate_release_notes: true
+          make_latest: true
+          body: |
+            本版本修复当前已知 Issue，并新增 Windows/macOS 双平台支持。
+
+            - 修复列表内嵌套代码块解析
+            - 修复页尾内容被裁切/丢失
+            - 新增 LaTeX 数学公式支持
+            - 新增 Windows x64 构建
+            - 新增 macOS Apple Silicon 构建
+            - 新增 macOS Intel 构建
+
+            macOS 构建暂未进行 Apple Developer ID 签名与 notarization。
+          files: "*.zip"

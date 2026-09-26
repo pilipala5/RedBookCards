@@ -53,8 +53,11 @@ class ImageExporter(QObject):
         # 确保输出文件夹存在
         self.output_folder.mkdir(parents=True, exist_ok=True)
         
-        # 确保WebView是固定尺寸
-        self.web_view.setFixedSize(1080, 1440)
+        # 确保 WebView 使用当前卡片尺寸，而不是写死 1080×1440。
+        self.web_view.setFixedSize(
+            self.html_generator.page_width,
+            self.html_generator.page_height
+        )
         self.web_view.setZoomFactor(1.0)  # 重置缩放
         
         # 开始导出第一页
@@ -168,8 +171,11 @@ class ImageExporter(QObject):
         
         # 在右下角添加生成时间（非常淡的水印）
         timestamp = time.strftime("%Y%m%d")
+        width = self.html_generator.page_width if self.html_generator else 1080
+        height = self.html_generator.page_height if self.html_generator else 1440
         painter.drawText(
-            1000, 1420,
+            max(10, width - 80),
+            max(20, height - 20),
             f"{timestamp}"
         )
     
@@ -188,10 +194,11 @@ class ImageExporter(QObject):
             printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
             printer.setOutputFileName(output_file)
             
-            # 设置页面大小为小红书卡片比例
-            # 注意：PDF使用点(point)作为单位，1点 = 1/72英寸
-            # 1080px × 1440px 在 96 DPI 下约等于 810pt × 1080pt
-            page_size = QPageSize(QSize(810, 1080), QPageSize.Unit.Point)
+            # 设置页面大小为当前卡片比例。
+            # PDF 使用 point；按 CSS 常用 96 DPI 将像素换算为 72 DPI point。
+            width_pt = int(html_generator.page_width * 72 / 96)
+            height_pt = int(html_generator.page_height * 72 / 96)
+            page_size = QPageSize(QSize(width_pt, height_pt), QPageSize.Unit.Point)
             printer.setPageSize(page_size)
             printer.setPageMargins(0, 0, 0, 0, QPrinter.Unit.Millimeter)
             
@@ -224,9 +231,9 @@ class ImageExporter(QObject):
                 # 添加分页符
                 combined_content += '<div style="page-break-before: always;"></div>'
             
-            # 添加页面内容，包装在固定尺寸的容器中
+            # 添加页面内容，包装在当前尺寸的容器中
             combined_content += f'''
-            <div style="width: 1080px; height: 1440px; position: relative; overflow: hidden;">
+            <div style="width: {html_generator.page_width}px; height: {html_generator.page_height}px; position: relative; overflow: hidden;">
                 {page}
             </div>
             '''
