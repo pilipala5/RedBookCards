@@ -442,9 +442,8 @@ class PreviewWidget(QWidget):
             # 使用智能分页器进行分页
             self.current_pages = self.paginator.paginate(html_content)
             
-            # 优化分页结果
-            self.current_pages = self.paginator.optimize_pages(self.current_pages)
-            
+            # paginate() 内部已经执行过一次 optimize_pages()。
+            # 不要二次合并页面，否则会再次依据估算高度合并，增加页尾裁切风险。
             self.total_pages = len(self.current_pages)
             self.current_page = 1
             
