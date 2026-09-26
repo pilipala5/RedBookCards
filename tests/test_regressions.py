@@ -49,7 +49,7 @@ class MarkdownRegressionTests(unittest.TestCase):
         source = r"""Inline: $E=mc^2$.
 
 $$
-\\frac{a}{b} = c
+\frac{a}{b} = c
 $$
 """
         html = self.processor.parse(source)
