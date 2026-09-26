@@ -55,7 +55,7 @@ $$
         html = self.processor.parse(source)
         soup = BeautifulSoup(html, "html.parser")
         maths = soup.find_all("math")
-        self.assertGreaterEqual(len(maths), 2)
+        self.assertGreaterEqual(len(maths), 2, html)
         self.assertTrue(any(m.get("display") == "block" for m in maths))
         self.assertTrue(any(m.get("display") == "inline" for m in maths))
 
